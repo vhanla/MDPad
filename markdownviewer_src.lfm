@@ -1,0 +1,315 @@
+object Form1: TForm1
+  Left = 0
+  Height = 313
+  Top = 0
+  Width = 755
+  ActiveControl = TrackBar1
+  Caption = 'Form1'
+  ClientHeight = 293
+  ClientWidth = 755
+  Color = clBtnFace
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Menu = MainMenu1
+  OnClose = FormClose
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  OnKeyPress = FormKeyPress
+  OnMouseDown = FormMouseDown
+  OnResize = FormResize
+  OnShow = FormShow
+  LCLVersion = '1.9.0.0'
+  object Splitter1: TSplitter
+    Left = 0
+    Height = 290
+    Top = 0
+    Width = 5
+    OnMoved = Splitter1Moved
+  end
+  object TrackBar1: TTrackBar
+    Left = 605
+    Height = 29
+    Top = 384
+    Width = 150
+    Max = 5
+    OnChange = TrackBar1Change
+    Position = 2
+    TabOrder = 1
+  end
+  object StatusBar1: TStatusBar
+    Left = 0
+    Height = 23
+    Top = 290
+    Width = 755
+    Panels = <    
+      item
+        Width = 600
+      end    
+      item
+        Width = 50
+      end>
+    Visible = False
+  end
+  object OpenDialog1: TOpenDialog
+    Left = 152
+  end
+  object MainMenu1: TMainMenu
+    Left = 240
+    Top = 32
+    object File1: TMenuItem
+      Caption = '&File'
+      object New1: TMenuItem
+        Caption = '&New'
+        ShortCut = 16462
+        OnClick = New1Click
+      end
+      object Open1: TMenuItem
+        Caption = '&Open'
+        ShortCut = 16463
+        OnClick = Open1Click
+      end
+      object Save1: TMenuItem
+        Caption = '&Save'
+        ShortCut = 16467
+        OnClick = Save1Click
+      end
+      object Saveas1: TMenuItem
+        Caption = 'Save &as'
+        OnClick = Saveas1Click
+      end
+      object ExportHTML1: TMenuItem
+        Caption = '&Export as HTML'
+        OnClick = ExportHTML1Click
+      end
+      object N1: TMenuItem
+        Caption = '-'
+      end
+      object Pageconfig1: TMenuItem
+        Caption = 'Page &config'
+        OnClick = Pageconfig1Click
+      end
+      object PrintPreview1: TMenuItem
+        Caption = 'Print Pre&view'
+        OnClick = PrintPreview1Click
+      end
+      object Print1: TMenuItem
+        Caption = '&Print'
+        ShortCut = 16464
+        OnClick = Print1Click
+      end
+      object N4: TMenuItem
+        Caption = '-'
+      end
+      object Preferences1: TMenuItem
+        Caption = 'Pre&ferences'
+        object Registerfilestoopenwith1: TMenuItem
+          Caption = '&Make it default editor'
+          OnClick = Registerfilestoopenwith1Click
+        end
+        object Waitafewsecondsbeforeupdatingthepreview1: TMenuItem
+          Caption = '&Wait before update preview'
+          OnClick = Waitafewsecondsbeforeupdatingthepreview1Click
+        end
+        object Synceditwithpreview1: TMenuItem
+          Caption = '&Sync edit with preview'
+          OnClick = Synceditwithpreview1Click
+        end
+        object mnuSyntax: TMenuItem
+          Caption = 'Enable Syntax highlighter'
+          OnClick = mnuSyntaxClick
+        end
+        object mnuTheme: TMenuItem
+          Caption = 'Enable Custom Theme'
+          OnClick = mnuThemeClick
+        end
+        object mnuCSS: TMenuItem
+          Caption = 'Enable Custom Style'
+          OnClick = mnuCSSClick
+        end
+      end
+      object N2: TMenuItem
+        Caption = '-'
+      end
+      object Exit1: TMenuItem
+        Caption = 'E&xit'
+        ShortCut = 16471
+        OnClick = Exit1Click
+      end
+    end
+    object Edit1: TMenuItem
+      Caption = '&Edit'
+      object Undo1: TMenuItem
+        Caption = '&Undo'
+        ShortCut = 16474
+        OnClick = Undo1Click
+      end
+      object N7: TMenuItem
+        Caption = '-'
+      end
+      object Cut1: TMenuItem
+        Caption = 'Cu&t'
+        ShortCut = 16472
+        OnClick = Cut1Click
+      end
+      object Copy1: TMenuItem
+        Caption = '&Copy'
+        ShortCut = 16451
+        OnClick = Copy1Click
+      end
+      object Paste1: TMenuItem
+        Caption = '&Paste'
+        ShortCut = 16470
+        OnClick = Paste1Click
+      end
+      object N6: TMenuItem
+        Caption = '-'
+      end
+      object Find1: TMenuItem
+        Caption = '&Find'
+        ShortCut = 16454
+        OnClick = Find1Click
+      end
+      object N9: TMenuItem
+        Caption = '-'
+      end
+      object SelectAll1: TMenuItem
+        Caption = '&Select All'
+        ShortCut = 16449
+        OnClick = SelectAll1Click
+      end
+    end
+    object Format1: TMenuItem
+      Caption = '&Format'
+      object Wordwrap1: TMenuItem
+        Caption = '&Wordwrap'
+        OnClick = Wordwrap1Click
+      end
+      object Font1: TMenuItem
+        Caption = '&Font...'
+        OnClick = Font1Click
+      end
+    end
+    object View1: TMenuItem
+      Caption = '&View'
+      object EditorandResult1: TMenuItem
+        Caption = 'Editor and Result'
+        Checked = True
+        ShortCut = 118
+        OnClick = EditorandResult1Click
+      end
+      object Editoronly1: TMenuItem
+        Caption = 'Editor only'
+        ShortCut = 119
+        OnClick = Editoronly1Click
+      end
+      object Resultonly1: TMenuItem
+        Caption = 'Result only'
+        ShortCut = 120
+        OnClick = Resultonly1Click
+      end
+      object N5: TMenuItem
+        Caption = '-'
+      end
+      object FullScreen1: TMenuItem
+        Caption = 'FullScreen'
+        ShortCut = 122
+        OnClick = FullScreen1Click
+      end
+      object N10: TMenuItem
+        Caption = '-'
+      end
+      object Statusbar2: TMenuItem
+        Caption = '&Statusbar'
+        OnClick = Statusbar2Click
+      end
+    end
+    object Engines1: TMenuItem
+      Caption = '&Engines'
+      object engPageDown: TMenuItem
+        Tag = 1
+        Caption = '&PageDown'
+        Checked = True
+        OnClick = toggleEngine
+      end
+      object engMarkDownJS: TMenuItem
+        Tag = 2
+        Caption = '&MarkDown.JS'
+        OnClick = toggleEngine
+      end
+      object engMarked: TMenuItem
+        Tag = 3
+        Caption = 'Mar&ked'
+        OnClick = toggleEngine
+      end
+      object engShowDown: TMenuItem
+        Tag = 4
+        Caption = '&ShowDown'
+        Visible = False
+        OnClick = toggleEngine
+      end
+      object engMarkdownit: TMenuItem
+        Tag = 5
+        Caption = '&Markdown&It'
+        OnClick = toggleEngine
+      end
+      object engNative: TMenuItem
+        Tag = 6
+        Caption = '&Native Markdown'
+        OnClick = toggleEngine
+      end
+    end
+    object N3: TMenuItem
+      Caption = '&?'
+      object Helponline1: TMenuItem
+        Caption = '&Help (online)'
+        OnClick = Helponline1Click
+      end
+      object N8: TMenuItem
+        Caption = '-'
+      end
+      object About1: TMenuItem
+        Caption = '&About'
+        OnClick = About1Click
+      end
+    end
+  end
+  object SaveDialog1: TSaveDialog
+    Left = 200
+    Top = 8
+  end
+  object tmrHiddenElements: TTimer
+    Interval = 500
+    OnTimer = tmrHiddenElementsTimer
+    Left = 152
+    Top = 216
+  end
+  object FontDialog1: TFontDialog
+    Font.Color = clWindowText
+    Font.Height = -11
+    Font.Name = 'Tahoma'
+    MinFontSize = 0
+    MaxFontSize = 0
+    Left = 216
+    Top = 104
+  end
+  object tmrKeyEvent: TTimer
+    Enabled = False
+    Interval = 125
+    OnTimer = tmrKeyEventTimer
+    Left = 160
+    Top = 144
+  end
+  object FindDialog1: TFindDialog
+    OnFind = FindDialog1Find
+    Left = 144
+    Top = 88
+  end
+  object tmrScrollSyncer: TTimer
+    Enabled = False
+    Interval = 125
+    OnTimer = tmrScrollSyncerTimer
+    Left = 368
+    Top = 112
+  end
+end
