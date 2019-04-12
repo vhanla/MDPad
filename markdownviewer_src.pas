@@ -90,8 +90,13 @@ type
     property SelStart: Integer read GetSelStart write SetSelStart;
   end;
 
+  { TWebBrowser }
+
   TWebBrowser = class(SHDocVw_1_1_TLB.TEvsWebBrowser)
     procedure CNChar(var Message: TWMChar);message CN_CHAR;
+  public
+    constructor Create(TheOwner: TComponent); override;
+    destructor Destroy; override;
   end;
 type
 
@@ -314,9 +319,20 @@ begin
      end;
    end;
 end;
-procedure TWebBrowser.CNChar(var Message: TWMKey);
+procedure TWebBrowser.CNChar(var Message: TWMChar);
 begin
   Message.Result:=0;
+end;
+
+constructor TWebBrowser.Create(TheOwner: TComponent);
+begin
+  inherited Create(TheOwner);
+end;
+
+destructor TWebBrowser.Destroy;
+begin
+  if Assigned(Self) then  self.Destroy;
+  inherited Destroy;
 end;
 
 function LoadFileToStr(const FileName: TFileName): String;
@@ -888,7 +904,8 @@ begin
   SaveINI;
   BCEditor1.Text := '';
   BCEditor1.Free;
-  Browser.Free;
+  FreeAndNil(Browser);
+  //Browser.Free;
   BrowserContainer.Free;
 end;
 
