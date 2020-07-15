@@ -94,4 +94,4 @@ lib/
 bin/
 trace.log 
 .vscode/
-
+settings.ini
