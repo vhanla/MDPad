@@ -332,7 +332,7 @@ end;
 
 destructor TWebBrowser.Destroy;
 begin
-  if Assigned(Self) then  self.Destroy;
+//  if Assigned(Self) then  FreeAndNil(Self);
   inherited Destroy;
 end;
 
