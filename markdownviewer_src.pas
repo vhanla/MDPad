@@ -74,7 +74,7 @@ uses
   Windows, Messages, SysUtils, Variants, Classes, Graphics,
   Controls, Forms, Dialogs, StdCtrls,
   Menus, ExtCtrls, ComCtrls, ActiveXContainer, MSHTML_4_0_TLB,
-  markdownprocessor, SHDocVw_1_1_TLB, ATSynEdit;
+  markdownprocessor, SHDocVw_1_1_TLB, ATSynEdit, UExceptionLogger;
 
 type
   TBCEditor = class(ATSynEdit.TATSynEdit)
@@ -103,6 +103,7 @@ type
   { TForm1 }
 
   TForm1 = class(TForm)
+    ExceptionLogger1: TExceptionLogger;
     OpenDialog1: TOpenDialog;
     MainMenu1: TMainMenu;
     File1: TMenuItem;

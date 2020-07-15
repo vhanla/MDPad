@@ -1,6 +1,6 @@
 object Form1: TForm1
   Left = 0
-  Height = 313
+  Height = 293
   Top = 0
   Width = 755
   ActiveControl = TrackBar1
@@ -19,10 +19,9 @@ object Form1: TForm1
   OnMouseDown = FormMouseDown
   OnResize = FormResize
   OnShow = FormShow
-  LCLVersion = '1.9.0.0'
   object Splitter1: TSplitter
     Left = 0
-    Height = 290
+    Height = 270
     Top = 0
     Width = 5
     OnMoved = Splitter1Moved
@@ -40,7 +39,7 @@ object Form1: TForm1
   object StatusBar1: TStatusBar
     Left = 0
     Height = 23
-    Top = 290
+    Top = 270
     Width = 755
     Panels = <    
       item
@@ -311,5 +310,10 @@ object Form1: TForm1
     OnTimer = tmrScrollSyncerTimer
     Left = 368
     Top = 112
+  end
+  object ExceptionLogger1: TExceptionLogger
+    MaxCallStackDepth = 20
+    Left = 299
+    Top = 211
   end
 end
