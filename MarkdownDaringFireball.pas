@@ -236,8 +236,7 @@ Type
     FpanicMode: boolean;
     FspecialLinkEmitter: TSpanEmitter;
   public
-    Constructor CreateDefault;
-    Constructor CreateSafe;
+    Constructor Create(safe : boolean);
     Destructor Destroy; override;
 
     property safeMode: boolean read FsafeMode write FsafeMode;
@@ -517,13 +516,23 @@ Begin
   result := false;
 End;
 
+function StringToShortString(const S: String) : ShortString;
+var
+  i : integer;
+begin
+  SetLength(result, min(s.Length, 255));
+  for i := 1 to length(result) do
+    result[i] := AnsiChar(s[i]);
+end;
+
+
 function StringToEnum(ATypeInfo: PTypeInfo; const AStr: String; defValue: integer): integer;
 var
   LTypeData: PTypeData;
   LPChar: PAnsiChar;
   LValue: ShortString;
 begin
-  LValue := ShortString(AStr);
+  LValue := StringToShortString(AStr);
 
   if ATypeInfo^.Kind = tkEnumeration then
   begin
@@ -549,7 +558,7 @@ end;
 constructor TMarkdownDaringFireball.Create;
 begin
   inherited Create;
-  FConfig := TConfiguration.CreateSafe;
+  FConfig := TConfiguration.Create(true);
   Femitter := TEmitter.Create(config);
 end;
 
@@ -958,7 +967,7 @@ begin
           while (line <> nil) do
           begin
             t := line.getLineType(FConfig);
-            if (not line.isEmpty and (line.prevEmpty and (line.leading = 0) and (not(t in [ltOLIST, ltULIST])))) then
+            if (not line.isEmpty and (line.prevEmpty and (line.leading = 0) and (not(t = type_)))) then
               break;
             line := line.next;
           end;
@@ -1011,19 +1020,12 @@ end;
 
 { TConfiguration }
 
-constructor TConfiguration.CreateDefault;
+constructor TConfiguration.Create(safe : boolean);
 begin
   inherited Create;
   FallowSpacesInFencedDelimiters := true;
   Fdecorator := TDecorator.Create;
-end;
-
-constructor TConfiguration.CreateSafe;
-begin
-  inherited Create;
-  FallowSpacesInFencedDelimiters := true;
-  Fdecorator := TDecorator.Create;
-  FsafeMode := true;
+  FsafeMode := safe;
 end;
 
 destructor TConfiguration.Destroy;
@@ -1544,6 +1546,33 @@ begin
   end;
 end;
 
+function isLetterOrDigit(c : char) : boolean;
+begin
+  {$IFDEF FPC}
+  result := c in ['A'..'Z', 'a'..'z', '0'..'9'];
+  {$ELSE}
+  result := c.isLetterOrDigit();
+  {$ENDIF}
+end;
+
+function isDigit(c : char) : boolean;
+begin
+  {$IFDEF FPC}
+  result := c in ['0'..'9'];
+  {$ELSE}
+  result := c.isDigit();
+  {$ENDIF}
+end;
+
+function isWhitespace(c : char) : boolean;
+begin
+  {$IFDEF FPC}
+  result := c in [' ', #9, #10, #13];
+  {$ELSE}
+  result := c.isWhitespace();
+  {$ENDIF}
+end;
+
 class function TEmitter.checkEntity(out_: TStringBuilder; s: String; start: integer): integer;
 var
   position, i: integer;
@@ -1581,7 +1610,7 @@ begin
     for i := 1 to out_.length - 1 do
     begin
       c := out_[i]; // zero based
-      if (not TCharacter.isLetterOrDigit(c)) then
+      if (not isLetterOrDigit(c)) then
         exit(-1);
     end;
     out_.append(';');
@@ -1790,7 +1819,7 @@ end;
 
 class function TEmitter.whitespaceToSpace(c: char): char;
 begin
-  if TCharacter.isWhitespace(c) then
+  if isWhitespace(c) then
     result := ' '
   else
     result := c;
@@ -1843,7 +1872,7 @@ begin
       end
       else if (FuseExtensions) then
       begin
-        if (TCharacter.isLetterOrDigit(c0)) and (c0 <> '_') and (TCharacter.isLetterOrDigit(c1)) then
+        if (isLetterOrDigit(c0)) and (c0 <> '_') and (isLetterOrDigit(c1)) then
           exit(mtNONE)
         else
           exit(mtEM_UNDERSCORE);
@@ -1873,7 +1902,7 @@ begin
       else
         exit(mtCODE_SINGLE);
     '\':
-      if c1 in ['\', '[', ']', '(', ')', '{', '}', '#', '"', '''', '.', '>', '<', '*', '+', '-', '_', '!', '`', '~', '^'] then
+      if CharInSet(c1, ['\', '[', ']', '(', ')', '{', '}', '#', '"', '''', '.', '>', '<', '*', '+', '-', '_', '!', '`', '~', '^']) then
         exit(mtESCAPE)
       else
         exit(mtNONE);
@@ -1914,9 +1943,9 @@ begin
           end;
         '"':
           begin
-            if (not TCharacter.isLetterOrDigit(c0)) and (c1 <> ' ') then
+            if (not isLetterOrDigit(c0)) and (c1 <> ' ') then
               exit(mtX_LDQUO);
-            if (c0 <> ' ') and (not TCharacter.isLetterOrDigit(c1)) then
+            if (c0 <> ' ') and (not isLetterOrDigit(c1)) then
               exit(mtX_RDQUO);
             exit(mtNONE);
           end;
@@ -2100,7 +2129,7 @@ end;
 
 class function TUtils.escape(out_: TStringBuilder; ch: char; position: integer): integer;
 begin
-  if ch in ['\', '[', ']', '(', ')', '{', '}', '#', '"', '''', '.', '>', '<', '*', '+', '-', '_', '!', '`', '^'] then
+  if CharInSet(ch, ['\', '[', ']', '(', ')', '{', '}', '#', '"', '''', '.', '>', '<', '*', '+', '-', '_', '!', '`', '^']) then
   begin
     out_.append(ch);
     result := position + 1;
@@ -2129,8 +2158,8 @@ begin
         break
       else
         out_.append(ch);
-      inc(position);
     end;
+    inc(position);
   end;
   if position = Length(s) then
     result := -1
@@ -2247,7 +2276,7 @@ end;
 
 class function TUtils.readRawUntil(out_: TStringBuilder; s: String; start: integer; cend: TSysCharSet): integer;
 var
-  position, n: integer;
+  position: integer;
   ch: char;
 begin
   position := start;
@@ -2287,7 +2316,7 @@ end;
 
 class function TUtils.readXMLUntil(out_: TStringBuilder; s: String; start: integer; cend: TSysCharSet): integer;
 var
-  position, n: integer;
+  position : integer;
   ch, stringChar: char;
   inString: boolean;
 begin
@@ -2419,7 +2448,7 @@ begin
   position := 1;
   if (bin[1] = '/') then
     inc(position);
-  while (TCharacter.isLetterOrDigit(bin[position])) do
+  while (isLetterOrDigit(bin[position])) do
   begin
     out_.append(bin[position]);
     inc(position)
@@ -2430,10 +2459,13 @@ class procedure TUtils.getXMLTag(out_: TStringBuilder; s: String);
 var
   position: integer;
 begin
+  if (1 + 1 > s.length) then
+    exit;
+
   position := 1;
   if (s[1 + 1] = '/') then
     inc(position);
-  while (TCharacter.isLetterOrDigit(s[1 + position])) do
+  while (isLetterOrDigit(s[1 + position])) do
   begin
     out_.append(s[1 + position]);
     inc(position)
@@ -2447,6 +2479,9 @@ var
   temp: TStringBuilder;
   tag: String;
 begin
+  if (1 + start + 1) > s.length then
+    exit(start);
+
   if (s[1 + start + 1] = '/') then
   begin
     isCloseTag := true;
@@ -2541,7 +2576,7 @@ begin
   for i := 0 to Length(fenceLine) - 1 do
   begin
     c := fenceLine[1 + i];
-    if (not TCharacter.isWhitespace(c)) and (c <> '`') and (c <> '~') then
+    if (not isWhitespace(c)) and (c <> '`') and (c <> '~') then
 //      exit(fenceLine.substring(i).trim()); PSTfix
       Exit(  Trim( Copy(fenceLine, i+1)));
   end;
@@ -2616,22 +2651,22 @@ end;
 function TLine.readUntil(chend: TSysCharSet): String;
 var
   sb: TStringBuilder;
-  position: integer;
+  pos: integer;
   ch, c: char;
 begin
   sb := TStringBuilder.Create();
   try
-    position := self.position;
-    while (position < Length(value)) do
+    pos := self.position;
+    while (pos < Length(value)) do
     begin
-      ch := value[1 + position];
-      if (ch = '\') and (position + 1 < Length(value)) then
+      ch := value[1 + pos];
+      if (ch = '\') and (pos + 1 < Length(value)) then
       begin
-        c := value[1 + position + 1];
+        c := value[1 + pos + 1];
         if CharInSet(c, ['\', '[', ']', '(', ')', '{', '}', '#', '"', '''', '.', '>', '*', '+', '-', '_', '!', '`', '~']) then
         begin
           sb.append(c);
-          inc(FPosition);
+          inc(pos);
         end
         else
         begin
@@ -2643,16 +2678,16 @@ begin
         break
       else
         sb.append(ch);
-      inc(position);
+      inc(pos);
     end;
 
-    if (position < Length(value)) then
-      ch := value[1 + position]
+    if (pos < Length(value)) then
+      ch := value[1 + pos]
     else
       ch := #10;
     if CharInSet(ch, chend) then
     begin
-      self.position := position;
+      self.position := pos;
       result := sb.ToString();
     end
     else
@@ -2756,10 +2791,10 @@ begin
       exit(ltULIST);
   end;
 
-  if (Length(value) - leading >= 3) and (TCharacter.isDigit(value[1 + leading])) then
+  if (Length(value) - leading >= 3) and (isDigit(value[1 + leading])) then
   begin
     i := leading + 1;
-    while (i < Length(value)) and (TCharacter.isDigit(value[1 + i])) do
+    while (i < Length(value)) and (isDigit(value[1 + i])) do
       inc(i);
     if (i + 1 < Length(value)) and (value[1 + i] = '.') and (value[1 + i + 1] = ' ') then
       exit(ltOLIST);
@@ -2785,34 +2820,34 @@ end;
 function TLine.readXMLComment(firstLine: TLine; start: integer): integer;
 var
   line: TLine;
-  position: integer;
+  pos: integer;
 begin
   line := firstLine;
   if (start + 3 < Length(line.value)) then
   begin
     if (line.value[1 + 2] = '-') and (line.value[1 + 3] = '-') then
     begin
-      position := start + 4;
+      pos := start + 4;
       while (line <> nil) do
       begin
-        while (position < Length(line.value)) and (line.value[1 + position] <> '-') do
-          inc(position);
-        if (position = Length(line.value)) then
+        while (pos < Length(line.value)) and (line.value[1 + pos] <> '-') do
+          inc(pos);
+        if (pos = Length(line.value)) then
         begin
           line := line.next;
-          position := 0;
+          pos := 0;
         end
         else
         begin
-          if (position + 2 < Length(line.value)) then
+          if (pos + 2 < Length(line.value)) then
           begin
-            if (line.value[1 + position + 1] = '-') and (line.value[1 + position + 2] = '>') then
+            if (line.value[1 + pos + 1] = '-') and (line.value[1 + pos + 2] = '>') then
             begin
               xmlEndLine := line;
-              exit(position + 3);
+              exit(pos + 3);
             end;
           end;
-          inc(position);
+          inc(pos);
         end;
       end;
     end;
@@ -2876,23 +2911,17 @@ begin
               if (p + 1 < Length(value)) then
               begin
                 if (value[1 + p + 1]) = '}' then
-                begin
                   inc(p);
-                  break;
-                end;
               end;
               inc(p);
-              break;
             end;
           '}':
             begin
               found := true;
-              break;
             end;
         else
           begin
             inc(p);
-            break;
           end;
         end;
 
@@ -2935,7 +2964,7 @@ begin
   temp := TStringBuilder.Create();
   try
     position := leading;
-    if (value[1 + leading + 1] = '!') then
+    if (value.length >= 1 + leading + 1) and (value[1 + leading + 1] = '!') then
     begin
       if (readXMLComment(self, leading) > 0) then
       begin
