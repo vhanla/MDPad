@@ -2733,3 +2733,159 @@ DEFAULTTHEME = '{ ' +
 '   } ' +
 '} ';
 
+
+GITHUBCSS =
+          '<!DOCTYPE html> ' +
+          '<html> ' +
+          '<head> ' +
+          '<title>THTMLViewer CSS Demo</title> ' +
+          '<style type="text/css"> ' +
+  '/* ' +
+  '  GitHub-Flavored Dark Mode CSS for THTMLViewer ' +
+  '  - Uses only CSS 1 / 2.1 properties known to be well-supported. ' +
+  '  - Focuses on typography, spacing, and color for a modern feel. ' +
+  '*/ ' +
+  ' ' +
+  'body { ' +
+  '    background-color: #0d1117; /* Very dark blue-gray, like GitHub */ ' +
+  '    color: #c9d1d9;             /* Light gray for main text */ ' +
+  '    font-family: sans-serif;    /* Relies on system''s default sans-serif font */ ' +
+  '    font-size: 11pt; ' +
+  '    line-height: 1.6; ' +
+  '    margin: 20px;               /* Give the whole document some breathing room */ ' +
+  '} ' +
+  ' ' +
+  '/* --- Headings --- */ ' +
+  'h1, h2, h3, h4, h5, h6 { ' +
+  '    font-weight: bold; ' +
+  '    color: #ffffff;             /* Brighter white for headings */ ' +
+  '    margin-top: 24px; ' +
+  '    margin-bottom: 16px; ' +
+  '    border-bottom: 1px solid #30363d; /* Subtle separator line */ ' +
+  '    padding-bottom: 6px; ' +
+  '} ' +
+  ' ' +
+  'h1 { font-size: 2em; } ' +
+  'h2 { font-size: 1.5em; } ' +
+  'h3 { font-size: 1.25em; } ' +
+  'h4 { font-size: 1em; } ' +
+  ' ' +
+  '/* Remove the border from smaller headings */ ' +
+  'h3, h4, h5, h6 { ' +
+  '    border-bottom: none; ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Basic Typography --- */ ' +
+  'p { ' +
+  '    margin-top: 0; ' +
+  '    margin-bottom: 16px; /* Vertical spacing for paragraphs */ ' +
+  '} ' +
+  ' ' +
+  'a { ' +
+  '    color: #58a6ff;         /* Bright blue for links */ ' +
+  '    text-decoration: none;  /* Modern look, no underline by default */ ' +
+  '} ' +
+  ' ' +
+  'a:hover { ' +
+  '    text-decoration: underline; /* Underline on hover for discoverability */ ' +
+  '} ' +
+  ' ' +
+  'strong, b { ' +
+  '    font-weight: bold; ' +
+  '} ' +
+  ' ' +
+  'em, i { ' +
+  '    font-style: italic; ' +
+  '} ' +
+  ' ' +
+  'hr { ' +
+  '    height: 1px; ' +
+  '    background-color: #30363d; /* Darker gray for horizontal rules */ ' +
+  '    border: 0; ' +
+  '    margin: 24px 0; ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Code Blocks & Inline Code --- */ ' +
+  '/* Inline code like `this` */ ' +
+  'code { ' +
+  '    font-family: monospace; ' +
+  '    font-size: 0.9em; ' +
+  '    background-color: #404040; ' +
+  '    padding: 2px 5px; ' +
+  '    /* border-radius is not supported, but good practice to include */ ' +
+  '    /* border-radius: 3px; */ ' +
+  '} ' +
+  ' ' +
+  '/* Fenced code blocks */ ' +
+  'pre { ' +
+  '    background-color: #161b22; ' +
+  '    border: 1px solid #30363d; ' +
+  '    padding: 16px; ' +
+  '    white-space: pre; /* Essential for preserving code formatting */ ' +
+  '    font-size: 0.9em; ' +
+  '    /* overflow: auto; is not fully supported, but the viewer adds scrollbars if needed */ ' +
+  '} ' +
+  ' ' +
+  '/* The <code> tag inside a <pre> block should not have its own box style */ ' +
+  'pre code { ' +
+  '    background-color: transparent; ' +
+  '    padding: 0; ' +
+  '    border: none; ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Blockquotes --- */ ' +
+  'blockquote { ' +
+  '    margin-left: 0; ' +
+  '    padding-left: 15px; ' +
+  '    border-left: 4px solid #30363d; ' +
+  '    color: #8b949e; /* Muted text color for quotes */ ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Lists --- */ ' +
+  'ul, ol { ' +
+  '    padding-left: 30px; ' +
+  '    margin-bottom: 16px; ' +
+  '} ' +
+  ' ' +
+  'li { ' +
+  '    margin-bottom: 5px; /* Spacing between list items */ ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Tables --- */ ' +
+  'table { ' +
+  '    border-collapse: collapse; ' +
+  '    width: 100%; ' +
+  '    margin-bottom: 16px; ' +
+  '} ' +
+  ' ' +
+  'th, td { ' +
+  '    border: 1px solid #30363d; ' +
+  '    padding: 6px 13px; ' +
+  '    text-align: left; ' +
+  '} ' +
+  ' ' +
+  'th { ' +
+  '    font-weight: bold; ' +
+  '    background-color: #161b22; ' +
+  '} ' +
+  ' ' +
+  '/* Alternating row colors for readability */ ' +
+  '/* Note: :nth-child is NOT supported, this is for other renderers. ' +
+  '   THTMLViewer will just show all rows with the default td background. */ ' +
+  'tr:nth-child(2n) { ' +
+  '    background-color: #161b22; ' +
+  '} ' +
+  'img {max-width: 100%; height: auto; } ' +
+  'table { width: 100%; border-collapse: collapse;} '+
+  'th, td { width: 100%; }'+
+
+           '</style> ' +
+           '</head> ' +
+           '<body> ' ;
+
+

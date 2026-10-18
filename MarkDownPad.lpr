@@ -3,13 +3,18 @@ program MarkDownPad;
 {$mode objfpc}{$H+}{$J-}
 
 uses
-  {$IFDEF UNIX}{$IFDEF UseCThreads}
-  cthreads,
-  {$ENDIF}{$ENDIF}
-  Forms, Interfaces, SysUtils, LazUTF8,
+  {$IFDEF UNIX}
+  cthreads, // Ahora sí se incluirá siempre que compiles en Linux/Unix
+  {$ENDIF}
+  Interfaces, // Interfaces debe ser la primera unidad LCL
+  Forms,
+  SysUtils,
+  LazUTF8,
   markdownviewer_src in 'markdownviewer_src.pas' {Form1};
 
+{$IFDEF MSWINDOWS}
 {$R *.res}
+{$ENDIF}
 
 begin
   {$if declared(UseHeapTrace)}
@@ -24,9 +29,3 @@ begin
   Application.CreateForm(TForm1, Form1);
   Application.Run;
 end.
- 
- 
- 
- 
- 
- 

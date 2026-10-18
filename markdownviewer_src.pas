@@ -9,6 +9,8 @@
   +Everything in executable, no external html files
 
   Changelog:
+  - 2026-10-01 v1.3.7
+    - Actually porting to Linux
   - 2018-09-23 v1.3.6
     - Workaround to borderstyle changing in order to restore WebViewer
 
@@ -66,30 +68,49 @@
   - 2012-06-07
     Initial release
 }
+{$MODE DELPHI}
+{$MODESWITCH ANONYMOUSFUNCTIONS} // Necesario en FPC 3.3.1 para procedimientos anónimos
 unit markdownviewer_src;
 
 interface
 
 uses
-  Windows, Messages, SysUtils, Variants, Classes, Graphics,
+  SysUtils, Variants, Classes, Graphics,
   Controls, Forms, Dialogs, StdCtrls,
-  Menus, ExtCtrls, ComCtrls, ActiveXContainer, MSHTML_4_0_TLB,
-  markdownprocessor, SHDocVw_1_1_TLB, ATSynEdit, UExceptionLogger;
+  Menus, ExtCtrls, ComCtrls,
+  {$IFDEF MSWINDOWS}
+  Windows, Messages, ActiveXContainer, MSHTML_4_0_TLB, SHDocVw_1_1_TLB,
+  {$ENDIF}
+  Generics.Collections, SyncObjs,
+  MyWiki.MarkdownConverter, MyWiki.WikiConverter, MyWiki.Header,
+  markdownprocessor, ATSynEdit, ATSynEdit_Commands,
+  ATStringProc,
+    ATSynEdit_Adapter_EControl,
+    ATSynEdit_Carets,
+    ATSynEdit_Bookmarks,
+    ATSynEdit_Export_HTML,
+    ATSynEdit_Globals,
+  ec_SyntAnal,
+  ec_proc_lexer,
+  HtmlView, HtmlGlobals,
+  // Markdown4D: alternative preview backend. It parses the markdown itself and
+  // draws it on a canvas (no HTML, no browser), so it needs none of the
+  // engine/HTML plumbing above.
+  Markdown4D,
+  Markdown4D.Defines,
+  Markdown4D.Ast.Interfaces,
+  Markdown4D.Theme,
+  Markdown4D.Layout.Interfaces,
+  Markdown4D.Layout.Engine,
+  Markdown4D.Layout.Renderer,
+  Markdown4D.Layout.DisplayList,
+  Markdown4D.Lcl.ImageDecoder,
+  Markdown4D.Lcl.MathFont,
+  Markdown4D.Lcl.Painter,
+  Markdown4D.Lcl.Viewer;
 
+{$IFDEF MSWINDOWS}
 type
-  TBCEditor = class(ATSynEdit.TATSynEdit)
-    procedure WMContextMenu(var Message: TWMContextMenu); message WM_CONTEXTMENU;
-//    procedure MouseUp(AButton: TMouseButton; AShift: TShiftState; X, Y: Integer); override;
-  protected
-    function GetSelLength: Integer; virtual;
-    function GetSelStart: Integer;
-    procedure SetSelLength(const Value: Integer);
-    procedure SetSelStart(const Value: Integer);
-  public
-    property SelLength: Integer read GetSelLength write SetSelLength;
-    property SelStart: Integer read GetSelStart write SetSelStart;
-  end;
-
   { TWebBrowser }
 
   TWebBrowser = class(SHDocVw_1_1_TLB.TEvsWebBrowser)
@@ -98,12 +119,31 @@ type
     constructor Create(TheOwner: TComponent); override;
     destructor Destroy; override;
   end;
+{$ENDIF}
 type
+
+  { Declaramos un hilo específico para la conversión }
+
+  { TConversionThread }
+
+  TConversionThread = class(TThread)
+  private
+    FMarkdown: string;
+    FRequestID: Int64;
+    FHtmlResult: string;
+    FHeaders: TObjectList<THeaderItem>;
+    // Procedimiento que se sincronizará con la UI principal
+    procedure SyncUpdateUI;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const AMarkdown: string; ARequestID: Int64);
+    destructor Destroy; override;
+  end;
 
   { TForm1 }
 
   TForm1 = class(TForm)
-    ExceptionLogger1: TExceptionLogger;
     OpenDialog1: TOpenDialog;
     MainMenu1: TMainMenu;
     File1: TMenuItem;
@@ -118,6 +158,8 @@ type
     Exit1: TMenuItem;
     N3: TMenuItem;
     About1: TMenuItem;
+    Splitter2: TSplitter;
+    Tree: TTreeView;
     View1: TMenuItem;
     EditorandResult1: TMenuItem;
     Editoronly1: TMenuItem;
@@ -155,6 +197,10 @@ type
     Wordwrap1: TMenuItem;
     Statusbar2: TMenuItem;
     N10: TMenuItem;
+    N12: TMenuItem;
+    PreviewHtml1: TMenuItem;
+    PreviewMarkdown4D1: TMenuItem;
+    PreviewIE1: TMenuItem;
     tmrScrollSyncer: TTimer;
     Synceditwithpreview1: TMenuItem;
     Engines1: TMenuItem;
@@ -174,7 +220,9 @@ type
     procedure Exit1Click(Sender: TObject);
     procedure About1Click(Sender: TObject);
     procedure New1Click(Sender: TObject);
+    {$IFDEF MSWINDOWS}
     procedure WebBrowser1BeforeNavigate2(ASender: TObject;pDisp:IDispatch;var URL:OleVariant;var Flags:OleVariant;var TargetFrameName:OleVariant;var PostData:OleVariant;var Headers:OleVariant;var Cancel:WordBool);
+    {$ENDIF}
     procedure FullScreen1Click(Sender: TObject);
 
     procedure EditorandResult1Click(Sender: TObject);
@@ -188,7 +236,9 @@ type
     procedure TrackBar1Change(Sender: TObject);
     procedure tmrHiddenElementsTimer(Sender: TObject);
     procedure Registerfilestoopenwith1Click(Sender: TObject);
+    {$IFDEF MSWINDOWS}
     procedure WebBrowser1DocumentComplete(Sender: TObject;pDisp:IDispatch;var URL:OleVariant);
+    {$ENDIF}
     procedure Save1Click(Sender: TObject);
     procedure Saveas1Click(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
@@ -213,21 +263,39 @@ type
     procedure Synceditwithpreview1Click(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure BCEditor1Change(Sender: TObject);
-    procedure BCEditor1DblClick(Sender: TObject);
     procedure BCEditor1KeyDown(Sender: TObject; var Key: Word;
       Shift: TShiftState);
     procedure BCEditor1KeyUp(Sender: TObject; var Key: Word;
       Shift: TShiftState);
 
     procedure ToggleEngine(Sender: TObject);
+    procedure TogglePreview(Sender: TObject);
     procedure mnuSyntaxClick(Sender: TObject);
     procedure mnuThemeClick(Sender: TObject);
     procedure mnuCSSClick(Sender: TObject);
-    procedure BCEditor1CaretChanged(ASender: TObject; ACaretPos: TPoint);
+    procedure BCEditor1CaretChanged(Sender: TObject);
+    procedure EditorPopupClick(Sender: TObject);
+    procedure PreviewHotSpotClick(Sender: TObject; const SRC: ThtString; var Handled: Boolean);
   private
     TrackBar1_Position:integer;
     SelectedEngine: Integer;
+    SelectedPreview: Integer; // pvHTML / pvMARKDOWN4D / pvIE
+
+    FCurrentRequestID: Int64; // A unique, increment ID for each conversion request
+    FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
+    FWorker: TConversionThread; // último worker lanzado (nil cuando termina, ver ConversionTerminated)
+    FShuttingDown: Boolean; // True durante FormDestroy: los workers no deben tocar la UI
     { Private declarations }
+    function UsingIE: Boolean;
+    function UsingMarkdown4D: Boolean;
+    function ActivePreview: TWinControl;
+    function PreviewHtmlBody: string;
+    procedure ApplyViewMode;
+    procedure UpdateCaretStatus;
+    procedure PrintHtmlViewer;
+    procedure PrintMarkdown4D;
+    procedure PerformConversion;
+    procedure ConversionTerminated(Sender: TObject);
     procedure ToggleFullScreen;
     procedure OpenMDFile(const fn: string);
     procedure OnFocus(Sender: TObject);
@@ -241,7 +309,16 @@ type
     procedure UpdateEngineInMenu;
     procedure LoadEngine(const DefaultText: string = '');
 
+    procedure UpdatePreviewInMenu;
+    procedure PreviewLinkClick(const Sender: TObject; const Url: UnicodeString);
+
+    procedure EditorChangeCaretPos(Sender: TObject);
+    procedure AdapterParseDone(Sender: TObject; ATime: integer);
+    procedure AdapterParseBegin(Sender: TObject);
+
+    {$IFDEF MSWINDOWS}
     procedure CMDialogKey(var Message: TCMDialogKey); message CM_DIALOGKEY;
+    {$ENDIF}
     //procedure WMContextMenu(var message: TWMContextMenu); message WM_CONTEXTMENU;
   public
     { Public declarations }
@@ -255,13 +332,26 @@ const
   mdSHOWDOWN = 4;
   mdMARKDOWNIT = 5;
   mdNATIVE = 6;
+// Which control renders the preview. Independent from SelectedEngine: the JS
+// engines force the IE backend on Windows, everything else honours this.
+const
+  pvHTML = 1;      // THtmlViewer, fed by the HTML the native engine produces
+  pvMARKDOWN4D = 2; // TMarkdownViewer, parses and draws the markdown itself
+  pvIE = 3;        // ActiveX WebBrowser (Windows only, JS engines)
 const
   DELAYTIME = 10;
 var
   Form1: TForm1;
-  BCEditor1: TBCEditor;
+  BCEditor1: TATSynEdit;
+  Manager: TecSyntaxManager;
+  Adapter: TATAdapterEControl;
+  PreviewHtml: THtmlViewer;
+  PreviewMd4D: TMarkdownViewer;
+  EditorPopup: TPopupMenu;
+  {$IFDEF MSWINDOWS}
   BrowserContainer: TActiveXContainer;
   Browser: TWebBrowser;
+  {$ENDIF}
   PrevWindowState: TWindowState;
   CurrentFile: string;
   PreviewCSS: string;
@@ -274,22 +364,27 @@ var
   Tryingtoclose: Boolean = False;
 
   SyncPercentage: integer;
-  FSelPos: Integer;//for find dialog
+  FSelPos: Integer;//for find dialog, 0-based string offset, -1 = find first
   TDelay: Integer=DELAYTIME; //10 seconds before update changes
   needtodelay: boolean = false; //when bigger files are opened we force to slow down
+  LastPreviewBody: string; //last HTML rendered by the native engine (used by Export)
+  PreviewBaseFontSize: Integer; //THtmlViewer.DefFontSize at startup, zoom scales it
+  {$IFDEF MSWINDOWS}
   // URLMON para quitar el feo sonido al iniciar cada enlace
   const
     SET_FEATURE_ON_PROCESS = $00000002;
     FEATURE_DISABLE_NAVIGATION_SOUNDS = 21;
   function CoInternetSetFeatureEnabled(FeatureEntry: DWORD; dwFlags: DWORD; fEnable: BOOL): HRESULT; stdcall; external 'urlmon.dll';
+  {$ENDIF}
 
 
 {$include pagedown.inc}
 
 implementation
-uses shellapi, activex, registry, inifiles;
+uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} inifiles, LCLIntf, Printers, PrintersDlgs, Types, Math;
 {$R *.lfm}
 
+{$IFDEF MSWINDOWS}
 procedure WBLoadHTML(WebBrowser: TWebBrowser; HTMLCode: string) ;
 var
    sl: TStringList;
@@ -335,6 +430,7 @@ begin
 //  if Assigned(Self) then  FreeAndNil(Self);
   inherited Destroy;
 end;
+{$ENDIF}
 
 function LoadFileToStr(const FileName: TFileName): String;
 var LStrings: TStringList;
@@ -348,6 +444,77 @@ begin
     end;
 end;
 
+{ TConversionThread }
+
+procedure TConversionThread.SyncUpdateUI;
+begin
+   // Este método corre en el hilo principal (Main Thread)
+   if Form1.FShuttingDown then
+     Exit; // el form se está destruyendo, no tocar la UI
+   if FRequestID = Form1.FCurrentRequestID then
+   begin
+     LastPreviewBody := FHtmlResult;
+     PreviewHtml.Text := GITHUBCSS + FHtmlResult + '</body></html>';
+     //Form1.UpdateHeadersList(Form1.VirtualStringTree1, FHeaders, Form1.FHeaderListIndex, 6);
+     PreviewHtml.Cursor := crDefault;
+     Form1.StatusBar1.Panels[1].Text := '';
+   end;
+end;
+
+procedure TConversionThread.Execute;
+var
+  md2: TMarkdownConverter;
+  hi, nh: THeaderItem;
+begin
+  try
+    md2 := TMarkdownConverter.Create;
+    try
+      md2.GiveIdToHeader := True;
+      FHtmlResult := md2.WikiToHtml(FMarkdown);
+
+      FHeaders := TObjectList<THeaderItem>.Create(True);
+      for hi in md2.Header.HeaderList do
+      begin
+        nh := THeaderItem.Create;
+        nh.Caption := hi.Caption;
+        nh.Id := hi.Id;
+        nh.Level := hi.Level;
+        nh.Line := hi.Line;
+        FHeaders.Add(nh);
+      end;
+    finally
+      md2.Free;
+    end;
+
+    // Pasamos el resultado a la UI en el hilo principal.
+    // Synchronize (bloqueante) en vez de Queue: con FreeOnTerminate el objeto
+    // podría liberarse antes de que el main procese la cola -> GPF intermitente.
+    if not Terminated then
+      Synchronize(SyncUpdateUI);
+  except
+    // Manejar posibles excepciones para que no rompan el hilo silenciosamente
+  end;
+end;
+
+constructor TConversionThread.Create(const AMarkdown: string; ARequestID: Int64
+  );
+begin
+  inherited Create(True); // Creado suspendido
+  FreeOnTerminate := True;
+  FMarkdown := AMarkdown;
+  FRequestID := ARequestID;
+  FHeaders := nil;
+end;
+
+destructor TConversionThread.Destroy;
+begin
+  // Decrementamos el contador de tareas atómicamente cuando el hilo realmente muere
+  TInterlocked.Decrement(Form1.FActiveTaskCount);
+  FHeaders.Free;
+  inherited Destroy;
+end;
+
+{$IFDEF MSWINDOWS}
 procedure ExecuteScript(doc: IHTMLDocument2;script: string; language:string);
 begin
   if doc<>nil then
@@ -388,6 +555,7 @@ begin
     end;
   end;
 end;
+{$ENDIF}
 
 procedure TForm1.About1Click(Sender: TObject);
 begin
@@ -395,7 +563,7 @@ begin
   if FileExists(ExtractFilePath(ParamStr(0))+'Readme.md') then
   begin
     if MessageDlg(ABOUTMDPAD+#13#13'Want to read more about?',mtInformation, mbYesNo, 0) = mrYes then
-      ShellExecute(0, 'OPEN', PChar(ParamStr(0)),PChar(ExtractFilePath(ParamStr(0))+'Readme.md'),nil,SW_SHOWNORMAL);
+      OpenMDFile(ExtractFilePath(ParamStr(0))+'Readme.md');
   end
   else
     MessageDlg(ABOUTMDPAD,mtInformation, [mbOK], 0);
@@ -403,14 +571,14 @@ end;
 
 procedure TForm1.Copy1Click(Sender: TObject);
 begin
-  if BCEditor1.GetSelLength > 0 then
-    BCEditor1.TextSelected; //CopyToClipboard;
+  if Length(BCEditor1.TextSelected) > 0 then
+    BCEditor1.DoCommand(cCommand_ClipboardCopy, TATCommandInvoke.MenuMain);
 end;
 
 procedure TForm1.Cut1Click(Sender: TObject);
 begin
-  if BCEditor1.GetSelLength > 0 then
-    BCEditor1.TextSelected; //CutToClipboard;
+  if Length(BCEditor1.TextSelected) > 0 then
+    BCEditor1.DoCommand(cCommand_ClipboardCut, TATCommandInvoke.MenuMain);
 end;
 
 procedure TForm1.EditorandResult1Click(Sender: TObject);
@@ -427,8 +595,8 @@ begin
   BCEditor1.Visible:=True;
   BCEditor1.Align:=alLeft;
 
-  BrowserContainer.Visible:=True;
-  BrowserContainer.Align:=alClient;
+  ActivePreview.Visible:=True;
+  ActivePreview.Align:=alClient;
   Splitter1.Enabled:=True;
 
   // let's disable wordwrap first, otherwise BCEditor will raise error
@@ -441,8 +609,8 @@ begin
 //  Memo1.Width:=ClientWidth div 2;
 //  WebBrowser1.Width:=ClientWidth div 2;
   BCEditor1.Width:=Trunc(ViewersRatio/100*ClientWidth);
-  BrowserContainer.Width:=ClientWidth-BCEditor1.Width;
-  Splitter1.Left:=BrowserContainer.Left;
+  ActivePreview.Width:=ClientWidth-BCEditor1.Width;
+  Splitter1.Left:=ActivePreview.Left;
 
   try
   if not prevwas then
@@ -462,20 +630,23 @@ begin
   Resultonly1.Checked:=False;
   EditorandResult1.Checked:=False;
   BCEditor1.Visible:=True;
-  BrowserContainer.Align:=alNone;
+  ActivePreview.Align:=alNone;
   BCEditor1.Align:=alClient;
    
   Splitter1.Enabled:=False;
-  BrowserContainer.Visible:=False;
+  ActivePreview.Visible:=False;
 
   //focus
   BCEditor1.SetFocus;
 end;
 
 procedure TForm1.Registerfilestoopenwith1Click(Sender: TObject);
+{$IFDEF MSWINDOWS}
 var
   r: TRegistry;
+{$ENDIF}
 begin
+  {$IFDEF MSWINDOWS}
   r:=TRegistry.Create;
   try
     r.RootKey:=HKEY_CURRENT_USER;
@@ -527,6 +698,7 @@ begin
   finally
     r.Free;
   end;
+  {$ENDIF}
 end;
 
 procedure TForm1.Resultonly1Click(Sender: TObject);
@@ -536,18 +708,20 @@ begin
   Resultonly1.Checked:=True;
   EditorandResult1.Checked:=False;
   BCEditor1.Visible:=False;
-  BrowserContainer.Visible:=True;
+  ActivePreview.Visible:=True;
   Splitter1.Enabled:=False;
   BCEditor1.Align:=alNone;
-  BrowserContainer.Align:=alClient;
-  //focus
-//  WebBrowser1.SetFocus;
+  ActivePreview.Align:=alClient;
+  {$IFDEF MSWINDOWS}
+  //focus (IE ActiveX needs explicit UI activation)
   //good tricks at http://stackoverflow.com/a/918869/537347
   // i guess they copied from here http://www.swissdelphicenter.ch/torry/showcode.php?id=1940
+  if UsingIE and Assigned(Browser) then
   with Browser.ComServer do
   if Document <> nil then
   with Application as IOleObject do
   DoVerb(OLEIVERB_UIACTIVATE, nil, BrowserContainer, 0, Handle, GetClientRect);
+  {$ENDIF}
 
 end;
 
@@ -592,6 +766,8 @@ begin
         BCEditor1.SaveToFile(FileName);
         CurrentFile:=FileName;
         Caption:='MDPad - '+FileName;
+        if Assigned(Adapter) then
+          Adapter.Lexer := Lexer_FindForFilename(Manager, CurrentFile);
         textBuffer:=BCEditor1.Text;
         if Tryingtoclose then
         close;
@@ -647,11 +823,23 @@ end;
 
 procedure TForm1.ExportHTML1Click(Sender: TObject);
 var
-  Rel: IHTMLElement;
+  RelHtml: string;
   HTMLText: TMemo;
+  {$IFDEF MSWINDOWS}
+  Rel: IHTMLElement;
+  {$ENDIF}
 begin
-  Rel:=GetElementById(Browser.ComServer.Document,'resultado') as IHTMLElement;
-  if Assigned(Rel) then
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+  begin
+    Rel:=GetElementById(Browser.ComServer.Document,'resultado') as IHTMLElement;
+    if not Assigned(Rel) then
+      Exit;
+    RelHtml:=Rel.innerHTML;
+  end
+  else
+  {$ENDIF}
+    RelHtml:=PreviewHtmlBody;
   begin
     //let's save it to disk
     with SaveDialog1 do
@@ -671,14 +859,14 @@ begin
         try
           HTMLText.Text:='<!DOCTYPE html><html><head><title>MDPad Exported'
           +#13' File</title><meta http-equiv="X-UA-Compatible" content="IE=9" ><meta charset="utf-8">'+CSS+'</head><body><div id="readme"><div class="md">'
-          +Rel.innerHTML+'</div></div><code>Created by <a href="http://apps.codigo'
+          +RelHtml+'</div></div><code>Created by <a href="http://apps.codigo'
           +'bit.info/2012/06/markdown-pad-markdown-textfile-editor.html" target="_blank">MDPad v1.1</a> Thanks to <a href="https://code.google.com/p/pagedown/" target="_blank">Pagedown</a></code></body></html>';
 
           //HTMLText.Lines.SaveToFile(FileName,TEncoding.UTF8);
           HTMLText.Lines.SaveToFile(FileName);
           //let's offer the change to open its folder
           if MessageDlg('Exported successfully'#13'Would you like to open its location folder?',mtConfirmation,[mbYes,mbNo],0)=mrYes then
-            ShellExecute(GetDesktopWindow,'OPEN',pchar(ExtractFilePath(FileName)),nil,nil,SW_SHOW);
+            OpenDocument(ExtractFilePath(FileName));
         finally
           HTMLText.Free;
         end;
@@ -691,53 +879,54 @@ end;
 
 procedure TForm1.Find1Click(Sender: TObject);
 begin
-  FSelPos:=0;
-//  FindDialog1.Execute;
-  BCEditor1.SelStart := 1;
-  BCEditor1.SelLength := 2;
+  FSelPos:=-1;
+  FindDialog1.Execute;
   BCEditor1.SetFocus;
 end;
 
 procedure TForm1.FindDialog1Find(Sender: TObject);
 var
-  S : string;
-  startpos : integer;
+  S: UnicodeString;
+  StartPos0, FoundPos, AbsOff: Integer;
+  P1, P2: TPoint;
 begin
   with TFindDialog(Sender) do
   begin
-    {If the stored position is 0 this cannot be a find next. }
-    if FSelPos = 0 then
+    {If the stored position is -1 this cannot be a find next. }
+    if FSelPos < 0 then
       Options := Options - [frFindNext];
 
      { Figure out where to start the search and get the corresponding
-       text from the memo. }
+       text from the editor. Offsets are 0-based ATSynEdit string offsets. }
     if frfindNext in Options then
     begin
       { This is a find next, start after the end of the last found word. }
-      StartPos := FSelPos + Length(Findtext);
-      S := Copy(BCEditor1.Text, StartPos, MaxInt);
+      StartPos0 := FSelPos + Length(FindText);
+      S := Copy(BCEditor1.Text, StartPos0 + 1, MaxInt);
     end
     else
     begin
       { This is a find first, start at the, well, start. }
       S := BCEditor1.Text;
-      //BCEditor1.SearchString := FindText;
-      StartPos := 1;
+      StartPos0 := 0;
     end;
     { Perform a global case-sensitive search for FindText in S }
-    FSelPos := Pos(FindText, S);
-    if FSelPos > 0 then
+    FoundPos := Pos(FindText, S);
+    if FoundPos > 0 then
     begin
        { Found something, correct position for the location of the start
          of search. }
-      FSelPos := FSelPos + StartPos - 1;
-      BCEditor1.SelStart := FSelPos - 1;
-      BCEditor1.SelLength := Length(FindText);
+      AbsOff := StartPos0 + FoundPos - 1;
+      FSelPos := AbsOff;
+      P1 := BCEditor1.OffsetToCaretPos(AbsOff);
+      P2 := BCEditor1.OffsetToCaretPos(AbsOff + Length(FindText));
+      with BCEditor1.Carets[0] do
+      begin
+        PosX := P1.X; PosY := P1.Y;
+        EndX := P2.X; EndY := P2.Y;
+      end;
+      BCEditor1.DoShowPos(P1, 0, 0, True, True, True);
       BCEditor1.SetFocus;
-      //Memo1.SelStart := FSelPos - 1;
-      //Memo1.SelLength := Length(FindText);
-      //Memo1.SetFocus;
-
     end
     else
     begin
@@ -790,17 +979,32 @@ procedure TForm1.FormCreate(Sender: TObject);
 var
   feditor: string;
   st: TStringStream;
+  mi: TMenuItem;
 begin
   Application.OnActivate:=OnFocus;
   Caption := 'MDPad';
 
-  BCEditor1 := TBCEditor.Create(Self);
-  BCEditor1.SetParent(Self);
+  BCEditor1 := TATSynEdit.Create(Self);
+  BCEditor1.Parent := Self;
   BCEditor1.OnChange := BCEditor1Change;
-  BCEditor1.OnDblClick := BCEditor1DblClick;
   BCEditor1.OnKeyDown := BCEditor1KeyDown;
   BCEditor1.OnKeyUp := BCEditor1KeyUp;
-{{  BCEditor1.OnChangeCaretPos := BCEditor1CaretChanged;}
+  BCEditor1.OnChangeCaretPos := BCEditor1CaretChanged;
+  BCEditor1.OptUnprintedVisible:=False;
+  BCEditor1.OptRulerVisible:=False;
+  BCEditor1.OnChangeCaretPos:=EditorChangeCaretPos;
+
+  // EControl syntax highlighting + code tree (optional: needs lib.lxl next to the exe)
+  Manager := TecSyntaxManager.Create(Self);
+  feditor := ExtractFilePath(ParamStr(0))+'lib.lxl';
+  if FileExists(feditor) then
+    Manager.LoadFromFile(feditor);
+
+  Adapter := TATAdapterEControl.Create(Self);
+  Adapter.OnParseBegin:=AdapterParseBegin;
+  Adapter.OnParseDone:=AdapterParseDone;
+  Adapter.AddEditor(BCEditor1);
+  Adapter.Lexer := Lexer_FindForFilename(Manager, CurrentFile);
 
 //  memo1.Visible:=false;
 //////////////////  BCEditor1.ScrollBars:=ssBoth;
@@ -808,9 +1012,41 @@ begin
 //  Form1.WindowProc:=ScrollWheel;
 ///  KeyPreview := True;
 //  SetPriorityClass(GetCurrentProcess, IDLE_PRIORITY_CLASS);
+  {$IFDEF MSWINDOWS}
   SetPriorityClass(GetCurrentProcess, $4000);//below normal al parecer mejor de IDLE
+  {$ENDIF}
 
-  // Create WebBrowser instance
+  //native editor context menu (ATSynEdit has no default popup)
+  EditorPopup := TPopupMenu.Create(Self);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Undo'; mi.Tag := cCommand_Undo; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := 'Cu&t'; mi.Tag := cCommand_ClipboardCut; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Copy'; mi.Tag := cCommand_ClipboardCopy; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Paste'; mi.Tag := cCommand_ClipboardPaste; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Delete'; mi.Tag := cCommand_TextDeleteSelection; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := 'Select &All'; mi.Tag := cCommand_SelectAll; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  BCEditor1.PopupMenu := EditorPopup;
+
+  // THtmlViewer preview, default on every platform (no JavaScript needed)
+  PreviewHtml := THtmlViewer.Create(Self);
+  PreviewHtml.Parent := Self;
+  PreviewHtml.Align := alClient;
+  PreviewHtml.DefFontName := 'Sans';
+  PreviewHtml.OnHotSpotClick := PreviewHotSpotClick;
+  PreviewBaseFontSize := PreviewHtml.DefFontSize;
+
+  // Markdown4D preview: an alternative backend that parses the markdown and
+  // draws it on a canvas. No HTML pipeline involved.
+  PreviewMd4D := TMarkdownViewer.Create(Self);
+  PreviewMd4D.Parent := Self;
+  PreviewMd4D.Align := alClient;
+  PreviewMd4D.Visible := False;
+  PreviewMd4D.OnLinkClick := PreviewLinkClick;
+  PreviewMd4D.ThemePreset := TMarkdownThemePreset.Light;
+
+  {$IFDEF MSWINDOWS}
+  // Legacy IE WebBrowser instance, only for the JavaScript engines
   BrowserContainer := TActiveXContainer.Create(Self);
   Browser := TWebBrowser.Create(Self);
   //Browser.SetParentComponent(BrowserContainer);
@@ -835,6 +1071,15 @@ begin
 
   // we need to load the engine prior to update its markdown generated contens
   WBLoadHTML(Browser, '');
+  {$ELSE}
+  //no IE outside Windows: JS engines unavailable, file association is Windows-only
+  engPageDown.Visible := False;
+  engMarkDownJS.Visible := False;
+  engMarked.Visible := False;
+  engShowDown.Visible := False;
+  engMarkdownit.Visible := False;
+  Registerfilestoopenwith1.Visible := False;
+  {$ENDIF}
 
   //
   ViewersRatio:= Trunc(BCEditor1.Width / ClientWidth * 100); //averiguamos el porcentaje que vale lo que ocupa memo1.width
@@ -889,30 +1134,58 @@ begin
   textBuffer := BCEditor1.Text;
   // let's load the configured engine
   LoadEngine;
+  //apply the saved view mode (editor/result layout) to the active preview
+  ApplyViewMode;
 
   CurrentFile:=''; //none
-  //let's open with explorer
-  if ParamCount>0 then
-    ReadingFromExplorer:=True
+  {$IFDEF MSWINDOWS}
+  //let's open with explorer (IE path resolves it on DocumentComplete,
+  //THtmlViewer path loads synchronously so open it right away)
+  if UsingIE then
+  begin
+    if ParamCount>0 then
+      ReadingFromExplorer:=True
+    else
+      ReadingFromExplorer:=False;
+  end
   else
+  {$ENDIF}
+  begin
     ReadingFromExplorer:=False;
+    if ParamCount>0 then
+      OpenMDFile(ParamStr(1));
+  end;
 
 end;
 
 procedure TForm1.FormDestroy(Sender: TObject);
 begin
+  // Avisar a los workers y esperarlos: su Synchronize necesita que el main
+  // bombee la cola, y SyncUpdateUI sale temprano gracias a FShuttingDown.
+  // Sin esto, un worker vivo tocaría PreviewHtml/Form1 ya liberados -> GPF.
+  FShuttingDown := True;
+  while FActiveTaskCount > 0 do
+  begin
+    CheckSynchronize(0);
+    Sleep(5);
+  end;
 //save ini settings
   SaveINI;
   BCEditor1.Text := '';
   BCEditor1.Free;
+  {$IFDEF MSWINDOWS}
   FreeAndNil(Browser);
   //Browser.Free;
   BrowserContainer.Free;
+  {$ENDIF}
+  PreviewHtml.Free;
+  PreviewMd4D.Free;
 end;
 
 //thanks to http://beensoft.blogspot.com/2007/10/fooling-around-with-twebbrowser-4.html
 procedure TForm1.FormKeyPress(Sender: TObject; var Key: Char);
 begin
+  {$IFDEF MSWINDOWS}
   if Key = #13 then
   begin
     Key := #0;
@@ -925,13 +1198,16 @@ begin
   end;
 //  if Key = #116 then
 //    WebBrowser1.Refresh;
+  {$ENDIF}
 end;
 
 procedure TForm1.FormMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 begin
+  {$IFDEF MSWINDOWS}
   ReleaseCapture;
   Perform(WM_SYSCOMMAND, $F012, 0)
+  {$ENDIF}
 end;
 
 procedure TForm1.FormResize(Sender: TObject);
@@ -957,7 +1233,7 @@ end;
 
 procedure TForm1.Helponline1Click(Sender: TObject);
 begin
-  ShellExecute(GetDesktopWindow,'OPEN','http://daringfireball.net/projects/markdown/syntax',nil,nil,SW_SHOW);
+  OpenURL('http://daringfireball.net/projects/markdown/syntax');
 end;
 
 procedure TForm1.tmrHiddenElementsTimer(Sender: TObject);
@@ -997,34 +1273,46 @@ begin
   begin
     //restore
     FullScreen1.Checked:=False;
-    BrowserContainer.Active := False;
-    BorderStyle:=bsSizeable;
-    BrowserContainer.Active := True;
-    WBLoadHTML(Browser, '');
-    LoadEngine;
-    ReloadingEngine := True;
+    {$IFDEF MSWINDOWS}
+    if UsingIE then
+    begin
+      BrowserContainer.Active := False;
+      BorderStyle:=bsSizeable;
+      BrowserContainer.Active := True;
+      WBLoadHTML(Browser, '');
+      LoadEngine;
+      ReloadingEngine := True;
+    end
+    else
+    {$ENDIF}
+      BorderStyle:=bsSizeable;
     { TODO: Restore last position of WebViewer after refresh }
     if PrevWindowState = wsMaximized then
       //Perform(WM_SYSCOMMAND, SC_MAXIMIZE,0)
       WindowState := wsMaximized
     else
-      Perform(WM_SYSCOMMAND, SC_RESTORE,0);
-      //WindowState := wsNormal;
+      WindowState := wsNormal;
   end
   else
   begin
     //fulscreen
     FullScreen1.Checked:=True;
-    BrowserContainer.Active := False;
-    BorderStyle:=bsNone;
-    BrowserContainer.Active := True;
-    WBLoadHTML(Browser, '');
-    LoadEngine;
-    ReloadingEngine := True;
+    {$IFDEF MSWINDOWS}
+    if UsingIE then
+    begin
+      BrowserContainer.Active := False;
+      BorderStyle:=bsNone;
+      BrowserContainer.Active := True;
+      WBLoadHTML(Browser, '');
+      LoadEngine;
+      ReloadingEngine := True;
+    end
+    else
+    {$ENDIF}
+      BorderStyle:=bsNone;
     PrevWindowState:=WindowState;
     if WindowState = wsMaximized then
-      Perform(WM_SYSCOMMAND, SC_RESTORE,0);
-      //WindowState := wsNormal;
+      WindowState := wsNormal;
     Sleep(10);
     //Perform(WM_SYSCOMMAND, SC_MAXIMIZE,0);
     WindowState := wsMaximized;
@@ -1032,15 +1320,23 @@ begin
 end;
 
 procedure TForm1.OpenMDFile(const fn: string);
+{$IFDEF MSWINDOWS}
 var
   Elem: IHTMLElement;
+{$ENDIF}
 //  script: string;
 ///  docs: IHTMLDocument3;
 ///  pos1,pos2:integer;
 begin
+  {$IFDEF MSWINDOWS}
   // let's make sure the engine is fully loaded before loading content into it
-  Elem:= GetElementById(Browser.ComServer.Document,'resultado') as IHTMLElement;
-  if Assigned(elem) then
+  if UsingIE then
+  begin
+    Elem:= GetElementById(Browser.ComServer.Document,'resultado') as IHTMLElement;
+    if not Assigned(elem) then
+      Exit;
+  end;
+  {$ENDIF}
   begin
     //prevent to open a file if previous was not saved
 
@@ -1054,9 +1350,9 @@ begin
     //lets finish it
 
     //BCEditor1.Lines.LoadFromFile(fn);
-    BCEditor1.LoadFromFile(fn);
+    BCEditor1.LoadFromFile(fn, []);
 //        if (Length(BCEditor1.Text)>10000)
-    if BCEditor1.GetTextLen > 10000
+    if Length(BCEditor1.Text) > 10000
     then needtodelay:=true
     else needtodelay:=false;
 
@@ -1064,6 +1360,8 @@ begin
 //        memo1.Text:=StringReplace(memo1.Text,'```','    ',[rfReplaceAll]);
     CurrentFile:=fn;
     Caption := 'MDPad - '+fn;
+    if Assigned(Adapter) then
+      Adapter.Lexer := Lexer_FindForFilename(Manager, CurrentFile);
     UpdateResult; //update the rendering
   end;
 
@@ -1071,39 +1369,30 @@ end;
 
 procedure TForm1.OnFocus(Sender: TObject);
 begin
+  {$IFDEF MSWINDOWS}
   //ShowMessage('ac');
-  if (BrowserContainer.Visible) and not (BCEditor1.Visible) then
+  if UsingIE and Assigned(BrowserContainer)
+  and (BrowserContainer.Visible) and not (BCEditor1.Visible) then
     with Browser.ComServer do
       if Document <> nil then
         with Application as IOleObject do
           DoVerb(OLEIVERB_UIACTIVATE, nil, BrowserContainer, 0, Handle, GetClientRect);
+  {$ENDIF}
 end;
 
 procedure TForm1.UpdateResult;
+{$IFDEF MSWINDOWS}
 var
   Elem: IHTMLElement;
-  md: TMarkdownProcessor;
+{$ENDIF}
 begin
 {  if (Length(Memo1.Text)>10000)
   and not WebBrowser1.Visible then
   exit;}
 
-  // we won't need to refresh a simple part of the html if native engine is chosen
-  if SelectedEngine = mdNative then
-  begin
-    md := TMarkdownProcessor.CreateDialect(mdDaringFireball);
-    try
-      // then continue with the update
-      Elem:= GetElementById(Browser.ComServer.Document,'resultado') as IHTMLElement;
-      if Assigned(Elem) then
-      begin
-        Elem.innerHTML:=md.process(BCEditor1.Text);
-      end;
-    finally
-      md.Free;
-    end;
-  end
-  else // but we will only update the text in the current loaded javascript engin
+  {$IFDEF MSWINDOWS}
+  // with a javascript engine we only update the text in the loaded engine
+  if UsingIE then
   begin
     // then continue with the update
     Elem:= GetElementById(Browser.ComServer.Document,'wmd-input') as IHTMLElement;
@@ -1112,7 +1401,22 @@ begin
       Elem.innerText:=BCEditor1.Text;
       ExecuteScript(Browser.ComServer.Document as IHTMLDocument2,'update();','javascript');
     end;
+    Exit;
   end;
+  {$ENDIF}
+
+  // Markdown4D parses incrementally on its own and marshals SetText to the
+  // main thread, so there is no worker and no HTML step here.
+  if UsingMarkdown4D then
+  begin
+    PreviewMd4D.Text := BCEditor1.Text;
+    Exit;
+  end;
+
+  // THtmlViewer has no scripting: la conversión corre en un worker thread
+  // y SyncUpdateUI refresca el preview al terminar (ver PerformConversion).
+  // No se toca el preview aquí: conserva el HTML anterior sin parpadeos.
+  PerformConversion;
 end;
 
 //let's find out events for mouse scrolling
@@ -1175,6 +1479,7 @@ begin
       ini.WriteInteger('Preview','zoom',TrackBar1.Position);
 
       ini.WriteInteger('MDPad', 'engine', SelectedEngine);
+      ini.WriteInteger('MDPad', 'preview', SelectedPreview);
 
       ini.WriteBool('MDPad', 'syntaxenabled', mnuSyntax.Checked);
       ini.WriteBool('MDPad', 'themeenabled', mnuTheme.Checked);
@@ -1184,6 +1489,108 @@ begin
     end;
 end;
 
+// True when the preview goes through the legacy IE ActiveX viewer
+// (Windows only, and only for the JavaScript engines; THtmlViewer
+// cannot run JavaScript, so it always uses the native engine).
+function TForm1.UsingIE: Boolean;
+begin
+  {$IFDEF MSWINDOWS}
+  // Picking a JS engine implies IE, whatever the selected preview backend is.
+  Result := Assigned(Browser)
+    and ((SelectedPreview = pvIE) or (SelectedEngine <> mdNATIVE));
+  {$ELSE}
+  Result := False;
+  {$ENDIF}
+end;
+
+// Markdown4D is the backend unless IE is on duty (IE wins on Windows).
+function TForm1.UsingMarkdown4D: Boolean;
+begin
+  Result := (not UsingIE) and (SelectedPreview = pvMARKDOWN4D);
+end;
+
+// The preview control currently on duty (IE container, Markdown4D or THtmlViewer).
+function TForm1.ActivePreview: TWinControl;
+begin
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+    Exit(BrowserContainer);
+  {$ENDIF}
+  if UsingMarkdown4D then
+    Exit(PreviewMd4D);
+  Result := PreviewHtml;
+end;
+
+// The HTML of the preview body, as Export HTML expects it. The Markdown4D
+// backend never runs the HTML pipeline, so its body is rendered on demand by
+// Markdown4D's own HTML renderer (which keeps the export consistent with what
+// the native preview shows).
+function TForm1.PreviewHtmlBody: string;
+begin
+  if UsingMarkdown4D then
+    Result := TMarkdown.ToHtml(BCEditor1.Text, TMarkdownDialect.Gfm)
+  else
+    Result := LastPreviewBody;
+end;
+
+// Re-applies the checked view mode (editor/result/both) to the active
+// preview. Needed after an engine switch changes the preview control,
+// and at startup to give both panes a sane initial layout.
+procedure TForm1.ApplyViewMode;
+begin
+  {$IFDEF MSWINDOWS}
+  if Assigned(BrowserContainer) then
+    BrowserContainer.Visible := False;
+  {$ENDIF}
+  PreviewHtml.Visible := False;
+  PreviewMd4D.Visible := False;
+  if EditorandResult1.Checked then
+    EditorandResult1Click(Self)
+  else if Editoronly1.Checked then
+    Editoronly1Click(Self)
+  else if Resultonly1.Checked then
+    Resultonly1Click(Self);
+  //Print Preview needs a scriptable DOM, only the IE viewer has one
+  PrintPreview1.Enabled := UsingIE;
+end;
+
+procedure TForm1.UpdateCaretStatus;
+begin
+  if StatusBar1.Visible and Assigned(BCEditor1) and (BCEditor1.Carets.Count > 0) then
+  begin
+    StatusBar1.Panels[1].Text := 'Line: '
+      + IntToStr(BCEditor1.Carets[0].PosY + 1)
+      + ', Column: '
+      + IntToStr(BCEditor1.Carets[0].PosX + 1);
+  end;
+end;
+
+procedure TForm1.EditorPopupClick(Sender: TObject);
+begin
+  if Sender is TMenuItem then
+    BCEditor1.DoCommand(TMenuItem(Sender).Tag, TATCommandInvoke.MenuMain);
+end;
+
+// THtmlViewer links: open http(s) targets in the external browser,
+// keep in-page anchors (#...) working inside the preview.
+procedure TForm1.PreviewHotSpotClick(Sender: TObject; const SRC: ThtString; var Handled: Boolean);
+begin
+  if (Pos('http://', SRC) = 1) or (Pos('https://', SRC) = 1) then
+  begin
+    OpenURL(SRC);
+    Handled := True;
+  end;
+end;
+
+// Markdown4D links. In-page anchors are already resolved by the viewer itself
+// (it scrolls to them), so only external targets arrive here. The viewer is
+// compiled with UnicodeString on, hence the explicit URL type.
+procedure TForm1.PreviewLinkClick(const Sender: TObject; const Url: UnicodeString);
+begin
+  if (Pos('http://', Url) = 1) or (Pos('https://', Url) = 1) then
+    OpenURL(UTF8Encode(Url));
+end;
+
 // This will load the selected MarkDownEngin
 // Incase is native, we still need to load the styles and container
 // in order to let the webbrowser detect ondocumentcomplete to start loading
@@ -1191,16 +1598,57 @@ end;
 // it will enable the selectedEngine and pass a default string if desired so
 procedure TForm1.LoadEngine(const DefaultText: string = '');
 begin
-  case SelectedEngine of
-    // in common engines, the default text will in hidden textarea
-    mdPAGEDOWN: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + PAGEDOWN + FOOTER);
-    mdMARKDOWNJS: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + MARKDOWNJS + FOOTER);
-    mdMARKED: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + MARKED + FOOTER);
-    mdSHOWDOWN: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + SHOWDOWN + FOOTER);
-    mdMARKDOWNIT: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + MARKDOWNIT + FOOTER);
-    // in native engine it will be a rendered html content, other wise it will show a plaint text only
-    mdNATIVE: WBLoadHTML(Browser, HEADER + PreviewCSS + OPENCONTAINER + DefaultText + CLOSECONTAINER + FOOTER);
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+  begin
+    case SelectedEngine of
+      // in common engines, the default text will in hidden textarea
+      mdPAGEDOWN: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + PAGEDOWN + FOOTER);
+      mdMARKDOWNJS: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + MARKDOWNJS + FOOTER);
+      mdMARKED: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + MARKED + FOOTER);
+      mdSHOWDOWN: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + SHOWDOWN + FOOTER);
+      mdMARKDOWNIT: WBLoadHTML(Browser, HEADER + PreviewCSS + BODY + DefaultText + BODY2 + MARKDOWNIT + FOOTER);
+    else
+      WBLoadHTML(Browser, HEADER + PreviewCSS + OPENCONTAINER + DefaultText + CLOSECONTAINER + FOOTER);
+    end;
+    Exit;
   end;
+  {$ENDIF}
+  // Markdown4D parses the markdown itself: there is no HTML document to load
+  // and no engine to install, just the source to hand over.
+  if UsingMarkdown4D then
+  begin
+    PreviewMd4D.Text := DefaultText;
+    Exit;
+  end;
+  // THtmlViewer path (default everywhere): synchronous full-document load,
+  // the native engine renders the markdown on UpdateResult
+  PreviewHtml.LoadFromString(HEADER + PreviewCSS + OPENCONTAINER + DefaultText + CLOSECONTAINER + FOOTER);
+end;
+
+procedure TForm1.EditorChangeCaretPos(Sender: TObject);
+var
+  NLine: integer;
+begin
+  if BCEditor1.Carets.Count>0 then
+    with BCEditor1.Carets[0] do
+      CodetreeSelectItemForPosition(Tree, PosX, PosY, NLine);
+end;
+
+procedure _OnTreeDuplicateNode(ANode: TTreeNode; const AFileName: string);
+begin
+  //empty
+end;
+
+procedure TForm1.AdapterParseDone(Sender: TObject; ATime: integer);
+begin
+  adapter.TreeFill(Tree, 1000, false, '?', @_OnTreeDuplicateNode);
+  EditorChangeCaretPos(Self);
+end;
+
+procedure TForm1.AdapterParseBegin(Sender: TObject);
+begin
+  Tree.Items.Clear;
 end;
 
 procedure TForm1.LoadINI;
@@ -1231,12 +1679,20 @@ begin
       TrackBar1_Position:= ini.ReadInteger('Preview','zoom',2);
 
       SelectedEngine := ini.ReadInteger('MDPad', 'engine', 6); //default set to native
+      SelectedPreview := ini.ReadInteger('MDPad', 'preview', pvHTML);
+      {$IFNDEF MSWINDOWS}
+      // The IE backend only exists on Windows; a settings.ini carried over from
+      // a Windows run must not leave the preview without a control.
+      if SelectedPreview = pvIE then
+        SelectedPreview := pvHTML;
+      {$ENDIF}
 
       mnuSyntax.Checked := ini.ReadBool('MDPad', 'syntaxenabled', false);
       mnuTheme.Checked := ini.ReadBool('MDPad', 'themeenabled', false);
       mnuCSS.Checked := ini.ReadBool('MDPad', 'cssenabled', false);
 
       UpdateEngineInMenu;
+      UpdatePreviewInMenu;
 
     finally
       ini.Free;
@@ -1259,8 +1715,15 @@ begin
     PreviewCSS := CSS;
   // update the viewer CSS
   LoadEngine;
-  ReloadingEngine := True;
-  Screen.Cursor := crHourGlass;
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+  begin
+    ReloadingEngine := True;
+    Screen.Cursor := crHourGlass;
+  end
+  else
+  {$ENDIF}
+    UpdateResult;
 end;
 
 procedure TForm1.mnuSyntaxClick(Sender: TObject);
@@ -1323,23 +1786,51 @@ begin
     SelectedEngine := TMenuItem(Sender).Tag;
     UpdateEngineInMenu;
     LoadEngine;
-    ReloadingEngine := True;
-    Screen.Cursor := crHourGlass;
-//    UpdateResult; // we need to updateresult when webbrowser is ready
+    {$IFDEF MSWINDOWS}
+    if UsingIE then
+    begin
+      ReloadingEngine := True;
+      Screen.Cursor := crHourGlass;
+    //    UpdateResult; // we need to updateresult when webbrowser is ready
+    end
+    else
+    {$ENDIF}
+      UpdateResult; //THtmlViewer loads synchronously, refresh right away
+    ApplyViewMode;
   end;
 
 end;
 
-//fixing arrow navigation of twebbrowser
-procedure TForm1.BCEditor1CaretChanged(ASender: TObject; ACaretPos: TPoint);
+// Picking a preview backend is orthogonal to picking a markdown engine: the JS
+// engines always mean IE on Windows, THtmlViewer and Markdown4D both render the
+// native pipeline's output (HTML vs. canvas). Markdown4D ignores SelectedEngine.
+procedure TForm1.TogglePreview(Sender: TObject);
 begin
-  if StatusBar1.Visible then
+  if Sender is TMenuItem then
   begin
-    StatusBar1.Panels[1].Text:='Line: '
-        +inttostr(ACaretPos.Y)
-        +', Column: '
-        +inttostr(ACaretPos.X);
+    SelectedPreview := TMenuItem(Sender).Tag;
+    UpdatePreviewInMenu;
+    LoadEngine;
+    UpdateResult;
+    ApplyViewMode;
   end;
+end;
+
+procedure TForm1.UpdatePreviewInMenu;
+begin
+  PreviewHtml1.Checked := SelectedPreview = pvHTML;
+  PreviewMarkdown4D1.Checked := SelectedPreview = pvMARKDOWN4D;
+  {$IFDEF MSWINDOWS}
+  PreviewIE1.Checked := SelectedPreview = pvIE;
+  {$ELSE}
+  PreviewIE1.Visible := False;
+  {$ENDIF}
+end;
+
+//fixing arrow navigation of twebbrowser
+procedure TForm1.BCEditor1CaretChanged(Sender: TObject);
+begin
+  UpdateCaretStatus;
 end;
 
 procedure TForm1.BCEditor1Change(Sender: TObject);
@@ -1351,33 +1842,6 @@ begin
   end
   else
     UpdateResult;
-end;
-
-procedure TForm1.BCEditor1DblClick(Sender: TObject);
-//requries jquery, so i disabled it
-{var
-  Linea: integer;
-  texto: string;}
-begin
-{  with Sender as TMemo do
-  begin
-//    Linea:=Perform(EM_LINEFROMCHAR, SelStart, 0); //select current first visible line
-    Linea:=Perform(EM_LINEFROMCHAR, SelStart, 0); //select current line
-    SelStart:=Perform(EM_LINEINDEX, Linea, 0);
-    SelLength:=Length(Lines[Linea]);
-    StatusBar1.Panels[0].Text:=Memo1.SelText;
-    texto:=SelText;
-    if trim(texto) <> '' then
-    begin
-      //scrolltop to that text on preview
-      try
-      ExecuteScript(WebBrowser1.Document as IHTMLDocument2, '$(window).scrollTop($("*:contains('''+trim(texto)+'''):last").offset().top);','javascript');
-      except
-      end;
-    end;
-
-    SelLength:=0;
-  end;}
 end;
 
 procedure TForm1.BCEditor1KeyDown(Sender: TObject; var Key: Word;
@@ -1392,186 +1856,26 @@ end;
 
 procedure TForm1.BCEditor1KeyUp(Sender: TObject; var Key: Word;
   Shift: TShiftState);
-var
-  row, col : integer;
 begin
-  //status bar
-  if StatusBar1.Visible then
-  begin
-/////////////////////    row:=BCEditor1.Perform(EM_LINEFROMCHAR, Memo1.SelStart, 0);
-    //col:=BCEditor1.SelStart-BCEditor1.Perform(EM_LINEINDEX, row, 0);
-{{{{{{{{{{{{{{{{{{    StatusBar1.Panels[1].Text:='Line: '
-        +inttostr(row+1)
-        +', Column: '
-        +inttostr(col);}
-  end;
+  //status bar follows the caret (also covered by OnChangeCaretPos)
+  UpdateCaretStatus;
 end;
 
 
 
-{ TBCEditor }
+{ Cross-platform editor: plain TATSynEdit is used directly (BCEditor1),
+  selection/clipboard go through its native DoCommand API. The old
+  Win32 user32 context-menu hack and EM_* selection emulation are gone,
+  replaced by the EditorPopup TPopupMenu built in FormCreate. }
 
-function TBCEditor.GetSelLength: Integer;
-//var
-  //Selection: TSelection;
-begin
-  result := 0;
-  exit;
-{$IF DEFINED(CLR)}
-  SendGetSel(Selection.StartPos, Selection.EndPos);
-{$ELSE}
-  {{SendMessage(Handle, EM_GETSEL, WPARAM(@Selection.StartPos), LPARAM(@Selection.EndPos));}
-{$ENDIF}
-  {{Result := Selection.EndPos - Selection.StartPos;}
-end;
-
-function TBCEditor.GetSelStart: Integer;
-{$IF DEFINED(CLR)}
-var
-  Temp: Integer;
-begin
-  SendGetSel(Result, Temp);
-{$ELSE}
-begin
-  SendMessage(Handle, EM_GETSEL, WPARAM(@Result), 0);
-{$ENDIF}
-end;
-
-{procedure TBCEditor.MouseUp(AButton: TMouseButton; AShift: TShiftState; X,
-  Y: Integer);
-begin
-  inherited;
-
-end;}
-
-procedure TBCEditor.SetSelLength(const Value: Integer);
-//var
-  //Selection: TSelection;
-begin
-{$IF DEFINED(CLR)}
-  SendGetSel(Selection.StartPos, Selection.EndPos);
-{$ELSE}
-  {{SendMessage(Handle, EM_GETSEL, WPARAM(@Selection.StartPos), LPARAM(@Selection.EndPos));}
-{$ENDIF}
-  {{Selection.EndPos := Selection.StartPos + Value;
-  SendMessage(Handle, EM_SETSEL, Selection.StartPos, Selection.EndPos);
-  SendMessage(Handle, EM_SCROLLCARET, 0, 0);}
-end;
-
-procedure TBCEditor.SetSelStart(const Value: Integer);
-begin
-  SendMessage(Handle, EM_SETSEL, Value, Value);
-end;
-
-procedure TBCEditor.WMContextMenu(var Message: TWMContextMenu);
-  //http://stackoverflow.com/a/10226523/537347
-  //to apply globally but not needed http://www.devsuperpage.com/Articles/views/Delphi/Art_1-1380.asp
-  //to recreate, not really a good idea https://theroadtodelphi.com/2011/12/07/adding-a-standard-context-popup-menu-to-a-synedit/
-  procedure CustomEditPopupMenu(re: TBCEditor; const LPoint: TPoint; out Handled: Boolean);
-  const
-    IDM_UNDO   = WM_UNDO;
-    IDM_CUT    = WM_CUT;
-    IDM_COPY   = WM_COPY;
-    IDM_PASTE  = WM_PASTE;
-    IDM_DELETE = WM_CLEAR;
-    IDM_SELALL = EM_SETSEL;
-    IDM_RTL    = $8000; // WM_APP ?
-
-    Enables: array[Boolean] of DWORD = (MF_DISABLED or MF_GRAYED, MF_ENABLED);
-    Checks: array[Boolean] of DWORD = (MF_UNCHECKED, MF_CHECKED);
-  var
-    hUser32: HMODULE;
-    hmnu, hmenuTrackPopup: HMENU;
-    Cmd: DWORD;
-    Flags: Cardinal;
-    HasSelText: Boolean;
-    FormHandle: HWND;
-//    IsRTL: Boolean;
-  begin
-    Handled := False;
-    hUser32 := LoadLibraryEx(user32, 0, LOAD_LIBRARY_AS_DATAFILE);
-    if (hUser32 <> 0) then
-    try
-      hmnu := LoadMenu(hUser32, MAKEINTRESOURCE(1));
-      if (hmnu <> 0) then
-      try
-        hmenuTrackPopup := GetSubMenu(hmnu, 0);
-
-        HasSelText := Length(re.TextSelected) <> 0;
-        {{EnableMenuItem(hmnu, IDM_UNDO,   Enables[re.CanUndo]);}
-        EnableMenuItem(hmnu, IDM_CUT,    Enables[HasSelText]);
-        EnableMenuItem(hmnu, IDM_COPY,   Enables[HasSelText]);
-        //EnableMenuItem(hmnu, IDM_PASTE,  Enables[Clipboard.HasFormat(CF_TEXT)]);
-        EnableMenuItem(hmnu, IDM_DELETE, Enables[HasSelText]);
-        EnableMenuItem(hmnu, IDM_SELALL, Enables[Length(re.Text) <> 0]);
-
-        //IsRTL := GetWindowLong(re.Handle, GWL_EXSTYLE) and WS_EX_RTLREADING <> 0;
-        //EnableMenuItem(hmnu, IDM_RTL, Enables[True]);
-        //CheckMenuItem(hmnu, IDM_RTL, Checks[IsRTL]);
-
-        FormHandle := GetParentForm(re).Handle;
-        Flags := TPM_LEFTALIGN or TPM_RIGHTBUTTON or TPM_NONOTIFY or TPM_RETURNCMD;
-        Cmd := DWORD(TrackPopupMenu(hmenuTrackPopup, Flags,
-          LPoint.X, LPoint.Y, 0, FormHandle, nil));
-        if Cmd <> 0 then
-        begin
-          case Cmd of
-            //IDM_UNDO:   re.ExecuteCommand(ecUndo,#0,nil); //re.Undo;
-            {{IDM_UNDO:   re.Undo;}
-            {{IDM_CUT:    re.CutToClipboard;}
-            {{IDM_COPY:   re.CopyToClipboard;}
-            {{IDM_PASTE:  re.PasteFromClipboard;}
-            //IDM_DELETE: re.ClearSelection;
-            IDM_SELALL: re.DoSelect_All;
-            //IDM_RTL:; // ?
-          end;
-        end;
-      finally
-        DestroyMenu(hmnu);
-        Handled := True;
-      end;
-    finally
-      FreeLibrary(hUser32);
-    end;
-  end;
-var
-  LPoint: TPoint;
-  LMessage: TMessage;
-  Handled: Boolean;
-begin
-  SetFocus;
-
-  if PopupMenu = nil then
-  begin
-    LPoint := SmallPointToPoint(Message.Pos);
-{    if not InvalidPoint(LPoint) then
-      LPoint := ScreenToClient(LPoint);}
-
-    Handled := False;
-    //DoContextPopup(LPoint, Handled);
-    CustomEditPopupMenu(Self, LPoint, Handled);
-    Message.Result := Ord(Handled);
-    if Handled then Exit;
-
-{$IF DEFINED(CLR)}
-    LMessage := UnwrapMessage(TObject(Message));
-{$ELSE}
-    LMessage := TMessage(Message);
-{$ENDIF}
-    with LMessage do
-      Result := CallWindowProc(DefWndProc, WindowHandle, Msg, WParam, LParam)
-  end
-  else
-    inherited;
-end;
-
+{$IFDEF MSWINDOWS}
 procedure TForm1.CMDialogKey(var Message: TCMDialogKey);
 begin
   if GetAsyncKeyState(VK_MENU)>=0 then
   begin
     case Message.CharCode of
       VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT:
-      if ActiveControl=BrowserContainer then
+      if Assigned(BrowserContainer) and (ActiveControl=BrowserContainer) then
       begin
         Message.Result:=0;
         exit;
@@ -1580,73 +1884,117 @@ begin
   end;
   inherited;
 end;
+{$ENDIF}
 
 procedure TForm1.tmrScrollSyncerTimer(Sender: TObject);
 var
-  ScrollInfo: TScrollInfo;
-  percentage: integer;
+  percentage, LineCount: integer;
+  {$IFDEF MSWINDOWS}
+  js: string;
+  {$ENDIF}
 begin
 
   if (Synceditwithpreview1.Checked) and (BCEditor1.Visible)
-  and (BrowserContainer.Visible) then
+  and (ActivePreview.Visible) then
   begin
-    with ScrollInfo do
+    // Markdown4D maps a source line to a scroll offset exactly, so the editor
+    // caret line can be pinned to the top of the preview.
+    if UsingMarkdown4D then
     begin
-      cbSize:=sizeof(self);
-      fMask:=SIF_POS or SIF_RANGE;
+      PreviewMd4D.ScrollOffset := PreviewMd4D.SourceLineToScrollOffset(BCEditor1.Carets[0].PosY);
+      Exit;
     end;
-    GetScrollInfo(BCEditor1.Handle, SB_VERT, ScrollInfo);
 
-    with ScrollInfo do
+    //editor position as caret-line ratio (Win32 GetScrollInfo is gone)
+    LineCount := BCEditor1.Strings.Count - 1;
+    if LineCount < 1 then
+      LineCount := 1;
+    percentage := BCEditor1.Carets[0].PosY * 100 div LineCount;
+    if percentage < 0 then
+      percentage := 0
+    else if percentage > 100 then
+      percentage := 100;
+
+    if SyncPercentage<>percentage then
     begin
-      if nMax<>0 then
-      percentage:=trunc(nPos/nMax*100);
-
-      if SyncPercentage<>percentage then
-      begin
-        SyncPercentage:=percentage;
-        try
-          if nMax > 5 then
-          ExecuteScript(Browser.ComServer.Document as IHTMLDOcument2, 'document.documentElement.scrollTop='+inttostr(percentage)+'/100*document.documentElement.scrollHeight','javascript');
-        except
-        end;
-      end;
+      SyncPercentage:=percentage;
+      {$IFDEF MSWINDOWS}
+      if UsingIE then
+      try
+        js := 'document.documentElement.scrollTop='+inttostr(percentage)+'/100*document.documentElement.scrollHeight';
+        ExecuteScript(Browser.ComServer.Document as IHTMLDOcument2, js, 'javascript');
+      except
+      end
+      else
+      {$ENDIF}
+      if PreviewHtml.VScrollBarRange > 0 then
+        PreviewHtml.VScrollBarPosition := percentage * PreviewHtml.VScrollBarRange div 100;
     end;
   end;
 end;
 
 procedure TForm1.TrackBar1Change(Sender: TObject);
+{$IFDEF MSWINDOWS}
 var
   vIn, vOut: OleVariant;
+{$ENDIF}
+const
+  ZoomPct: array[0..5] of Integer = (50, 75, 100, 125, 150, 200);
+var
+  pos: Integer;
 begin
-  vOut:=NULL;
-  with TrackBar1 do
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
   begin
-    if Position = 0 then
-//      WebBrowser1.OleObject.Document.Body.Style.Zoom:=0.25
-      vIn := 50
-    else if Position = 1 then
-//      WebBrowser1.OleObject.Document.Body.Style.Zoom:=0.5
-      vIn := 75
-    else if Position = 2 then
-//      WebBrowser1.OleObject.Document.Body.Style.Zoom:=1.0
-      vIn := 100
-    else if Position = 3 then
-//      WebBrowser1.OleObject.Document.Body.Style.Zoom:=2.0
-      vIn := 125
-    else if Position = 4 then
-//      WebBrowser1.OleObject.Document.Body.Style.Zoom:=5.0
-      vIn := 150
-    else if Position = 5 then
-      //WebBrowser1.OleObject.Document.Body.Style.Zoom:=10.0;
-      vIn:=200;
-    Browser.ComServer.ExecWB(OLECMDID_OPTICAL_ZOOM,OLECMDEXECOPT_DONTPROMPTUSER,vIn,vOut);
+    vOut:=NULL;
+    with TrackBar1 do
+    begin
+      if Position = 0 then
+  //      WebBrowser1.OleObject.Document.Body.Style.Zoom:=0.25
+        vIn := 50
+      else if Position = 1 then
+  //      WebBrowser1.OleObject.Document.Body.Style.Zoom:=0.5
+        vIn := 75
+      else if Position = 2 then
+  //      WebBrowser1.OleObject.Document.Body.Style.Zoom:=1.0
+        vIn := 100
+      else if Position = 3 then
+  //      WebBrowser1.OleObject.Document.Body.Style.Zoom:=2.0
+        vIn := 125
+      else if Position = 4 then
+  //      WebBrowser1.OleObject.Document.Body.Style.Zoom:=5.0
+        vIn := 150
+      else if Position = 5 then
+        //WebBrowser1.OleObject.Document.Body.Style.Zoom:=10.0;
+        vIn:=200;
+      Browser.ComServer.ExecWB(OLECMDID_OPTICAL_ZOOM,OLECMDEXECOPT_DONTPROMPTUSER,vIn,vOut);
+    end;
+    Exit;
   end;
+  {$ENDIF}
+  // Markdown4D has a real optical zoom, so the trackbar maps straight to it.
+  if UsingMarkdown4D then
+  begin
+    pos := TrackBar1.Position;
+    if pos < Low(ZoomPct) then
+      pos := Low(ZoomPct)
+    else if pos > High(ZoomPct) then
+      pos := High(ZoomPct);
+    PreviewMd4D.Zoom := ZoomPct[pos];
+    Exit;
+  end;
+  //THtmlViewer has no optical zoom: scale the default font size instead
+  pos := TrackBar1.Position;
+  if pos < Low(ZoomPct) then
+    pos := Low(ZoomPct)
+  else if pos > High(ZoomPct) then
+    pos := High(ZoomPct);
+  PreviewHtml.DefFontSize := PreviewBaseFontSize * ZoomPct[pos] div 100;
 end;
 
 procedure TForm1.Undo1Click(Sender: TObject);
 begin
-  {{BCEditor1.Undo;}
+  BCEditor1.DoCommand(cCommand_Undo, TATCommandInvoke.MenuMain);
 end;
 
 procedure TForm1.New1Click(Sender: TObject);
@@ -1680,7 +2028,7 @@ begin
     BCEditor1.Text:='';
     textBuffer := BCEditor1.Text;
     needtodelay:=false;
-    ExecuteScript(Browser.ComServer.Document as IHTMLDocument2, 'document.getElementById("wmd-input").value="";update();','javascript');
+    UpdateResult; //clears the preview in both viewers
     Caption := 'MDPad - untitled';
   end;
 end;
@@ -1724,30 +2072,227 @@ end;
 
 
 procedure TForm1.Pageconfig1Click(Sender: TObject);
+{$IFDEF MSWINDOWS}
 var
   vIn, vOut: OleVariant;
+{$ENDIF}
 begin
-  Browser.ComServer.ExecWB(OLECMDID_PAGESETUP, OLECMDEXECOPT_PROMPTUSER, vIn, vOut);
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+  begin
+    Browser.ComServer.ExecWB(OLECMDID_PAGESETUP, OLECMDEXECOPT_PROMPTUSER, vIn, vOut);
+    Exit;
+  end;
+  {$ENDIF}
+  with TPrinterSetupDialog.Create(Self) do
+  try
+    Execute;
+  finally
+    Free;
+  end;
 end;
 
 procedure TForm1.Paste1Click(Sender: TObject);
 begin
-  {{BCEditor1.PasteFromClipboard;}
+  BCEditor1.DoCommand(cCommand_ClipboardPaste, TATCommandInvoke.MenuMain);
 end;
 
 procedure TForm1.Print1Click(Sender: TObject);
+{$IFDEF MSWINDOWS}
 var
   vIn, vOut:OleVariant;
+{$ENDIF}
 begin
-  Browser.ComServer.ExecWB(OLECMDID_PRINT, OLECMDEXECOPT_PROMPTUSER, vIn, vOut);
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+  begin
+    Browser.ComServer.ExecWB(OLECMDID_PRINT, OLECMDEXECOPT_PROMPTUSER, vIn, vOut);
+    Exit;
+  end;
+  {$ENDIF}
+  if UsingMarkdown4D then
+    PrintMarkdown4D
+  else
+    PrintHtmlViewer;
+end;
+
+// THtmlViewer on Linux has no metafile printing (upstream defines
+// NoMetaFile outside Windows), so print page by page as bitmaps.
+procedure TForm1.PrintHtmlViewer;
+var
+  Bmp: TBitmap;
+  DocH, YTop, PageH: Integer;
+begin
+  with TPrintDialog.Create(Self) do
+  try
+    if not Execute then
+      Exit;
+  finally
+    Free;
+  end;
+  if CurrentFile <> '' then
+    Printer.Title := 'MDPad - ' + CurrentFile
+  else
+    Printer.Title := 'MDPad';
+  DocH := PreviewHtml.FullDisplaySize(Printer.PageWidth).cy;
+  if DocH < 1 then
+    Exit;
+  Printer.BeginDoc;
+  try
+    PageH := Printer.PageHeight;
+    if PageH < 1 then
+      PageH := DocH;
+    YTop := 0;
+    while YTop < DocH do
+    begin
+      Bmp := PreviewHtml.MakeBitmap(YTop, Printer.PageWidth, Printer.PageWidth, PageH);
+      try
+        if Assigned(Bmp) then
+          Printer.Canvas.Draw(0, 0, Bmp);
+      finally
+        Bmp.Free;
+      end;
+      Inc(YTop, PageH);
+      if YTop < DocH then
+        Printer.NewPage;
+    end;
+  finally
+    Printer.EndDoc;
+  end;
+end;
+
+// Markdown4D draws on a canvas, so printing lays the document out at the page
+// width and renders it page by page through an offscreen bitmap (the same trick
+// PrintHtmlViewer uses, since neither viewer has a printer of its own).
+procedure TForm1.PrintMarkdown4D;
+const
+  TargetPPI = 150; // resolution the page bitmaps are rendered at
+var
+  Bmp: TBitmap;
+  Painter: TMarkdownLclPainter;
+  Document: IMarkdownDocument;
+  DisplayList: IMarkdownDisplayList;
+  Theme: TMarkdownTheme;
+  OwnTheme: Boolean;
+  PageW, PageH, DocH, YTop, PPI, PrinterPPI: Integer;
+begin
+  with TPrintDialog.Create(Self) do
+  try
+    if not Execute then
+      Exit;
+  finally
+    Free;
+  end;
+  if CurrentFile <> '' then
+    Printer.Title := 'MDPad - ' + CurrentFile
+  else
+    Printer.Title := 'MDPad';
+
+  // FPC's TPrinter reports its resolution through XDPI/YDPI.
+  PrinterPPI := Printer.YDPI;
+  PPI := TargetPPI;
+  if (PrinterPPI > 0) and (PrinterPPI < PPI) then
+    PPI := PrinterPPI;
+  PageW := Round(Printer.PageWidth * PPI / PrinterPPI);
+  PageH := Round(Printer.PageHeight * PPI / PrinterPPI);
+  if (PageW < 1) or (PageH < 1) then
+    Exit;
+
+  // Print what the preview shows: same theme it is rendering with.
+  OwnTheme := False;
+  Theme := PreviewMd4D.Theme;
+  if not Assigned(Theme) then
+  begin
+    Theme := TMarkdownTheme.CreateLight;
+    OwnTheme := True;
+  end;
+  Bmp := TBitmap.Create;
+  try
+    Bmp.SetSize(PageW, PageH);
+    Painter := TMarkdownLclPainter.Create(Bmp.Canvas, PPI);
+    try
+      Document := TMarkdown.Parse(BCEditor1.Text, TMarkdownDialect.Gfm);
+      // The painter doubles as the text measurer (IPainter descends from
+      // ITextMeasurer), so the layout and the drawing share one object.
+      DisplayList := TMarkdownLayoutEngine.LayoutDocument(Document, PageW, Theme, Painter as ITextMeasurer);
+      if (DisplayList = nil) or (DisplayList.ItemCount = 0) then
+        Exit;
+      DocH := Ceil(DisplayList.Height);
+      Printer.BeginDoc;
+      try
+        YTop := 0;
+        while YTop < DocH do
+        begin
+          // OriginY names the document Y that maps to the top of the canvas, and
+          // the viewport is given in document coordinates (as the viewer does).
+          Painter.OriginY := YTop;
+          TMarkdownDisplayListRenderer.Render(DisplayList, Painter as IPainter,
+            TLayoutRectF.Create(0, YTop, PageW, YTop + PageH), Theme.BackgroundColor);
+          Printer.Canvas.StretchDraw(Rect(0, 0, Printer.PageWidth, Printer.PageHeight), Bmp);
+          Inc(YTop, PageH);
+          if YTop < DocH then
+            Printer.NewPage;
+        end;
+      finally
+        Printer.EndDoc;
+      end;
+    finally
+      Painter.Free;
+    end;
+  finally
+    Bmp.Free;
+    if OwnTheme then
+      Theme.Free;
+  end;
+end;
+
+procedure TForm1.PerformConversion;
+begin
+  if FShuttingDown then
+    Exit;
+  TInterlocked.Increment(FCurrentRequestID);
+
+  // El worker anterior quedó obsoleto (su RequestID ya no es el vigente):
+  // pedirle que termine evita acumular conversiones en ráfagas de tipeo.
+  // Se libera solo (FreeOnTerminate); ConversionTerminated nil-ea la referencia.
+  if Assigned(FWorker) then
+    FWorker.Terminate;
+
+  PreviewHtml.Cursor := crHourGlass;
+  StatusBar1.Panels[1].Text := 'Converting...';
+
+   TInterlocked.Increment(FActiveTaskCount);
+
+   // Instanciamos el hilo pasándole los datos necesarios
+   FWorker := TConversionThread.Create(BCEditor1.Text, FCurrentRequestID);
+   FWorker.OnTerminate := ConversionTerminated;
+   FWorker.Start; // Inicia la tarea
+end;
+
+procedure TForm1.ConversionTerminated(Sender: TObject);
+begin
+  // Corre en el main thread. No liberar aquí: el thread es FreeOnTerminate
+  // y se libera solo; solo nil-eamos si sigue siendo el vigente.
+  if Sender = FWorker then
+    FWorker := nil;
 end;
 
 procedure TForm1.PrintPreview1Click(Sender: TObject);
+{$IFDEF MSWINDOWS}
 var
   vIn, vOut: OleVariant;
+{$ENDIF}
 begin
+{$IFDEF MSWINDOWS}
+  if UsingIE then
+  begin
 //thanks to http://delphi.about.com/cs/adptips2004/a/bltip0504_5.htm
-  Browser.ComServer.ExecWB(OLECMDID_PRINTPREVIEW, OLECMDEXECOPT_PROMPTUSER, vIn, vOut);
+    Browser.ComServer.ExecWB(OLECMDID_PRINTPREVIEW, OLECMDEXECOPT_PROMPTUSER, vIn, vOut);
+    Exit;
+  end;
+{$ENDIF}
+  //THtmlViewer has no scriptable print preview; use Print instead
+  Print1Click(Sender);
 end;
 
 procedure TForm1.Waitafewsecondsbeforeupdatingthepreview1Click(Sender: TObject);
@@ -1755,6 +2300,7 @@ begin
   Waitafewsecondsbeforeupdatingthepreview1.Checked := not Waitafewsecondsbeforeupdatingthepreview1.Checked;
 end;
 
+{$IFDEF MSWINDOWS}
 procedure TForm1.WebBrowser1BeforeNavigate2(ASender: TObject;pDisp:IDispatch;var URL:OleVariant;var Flags:OleVariant;var TargetFrameName:OleVariant;var PostData:OleVariant;var Headers:OleVariant;var Cancel:WordBool);
 var
   ExternalRender: string;
@@ -1772,7 +2318,7 @@ begin
   begin //let's open in the webbrowser
     cancel:=true;
     if pos('http',URL)=1 then
-      ShellExecute(GetDesktopWindow,'OPEN',pchar(string(URL)),nil,nil,SW_SHOWNA);
+      OpenURL(string(URL));
   end;
 end;
 
@@ -1791,6 +2337,7 @@ begin
     Screen.Cursor := crDefault;
   end;
 end;
+{$ENDIF}
 
 {procedure TForm1.WMContextMenu(var message: TWMContextMenu);
 var

@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CONFIG>
   <ProjectOptions>
-    <Version Value="11"/>
-    <PathDelim Value="\"/>
+    <Version Value="13"/>
     <General>
       <Flags>
         <MainUnitHasUsesSectionForAllUnits Value="False"/>
@@ -11,7 +10,6 @@
         <MainUnitHasScaledStatement Value="False"/>
       </Flags>
       <SessionStorage Value="InProjectDir"/>
-      <MainUnit Value="0"/>
       <Title Value="MarkDownPad"/>
       <Scaled Value="True"/>
       <UseAppBundle Value="False"/>
@@ -22,18 +20,17 @@
       </XPManifest>
       <Icon Value="0"/>
     </General>
-    <BuildModes Count="3">
-      <Item1 Name="Default" Default="True"/>
-      <Item2 Name="Debug">
+    <BuildModes>
+      <Item Name="Default" Default="True"/>
+      <Item Name="Debug">
         <CompilerOptions>
           <Version Value="11"/>
-          <PathDelim Value="\"/>
           <Target>
             <Filename Value="MarkDownPad"/>
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+            <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
           <Parsing>
             <SyntaxOptions>
@@ -65,19 +62,21 @@
           </Linking>
           <Other>
             <CustomOptions Value="-dBorland -dVer150 -dDelphi7 -dCompiler6_Up -dPUREPASCAL"/>
+            <ExecuteAfter>
+              <Command Value="sh tools/copy-lexlib.sh"/>
+            </ExecuteAfter>
           </Other>
         </CompilerOptions>
-      </Item2>
-      <Item3 Name="Release">
+      </Item>
+      <Item Name="Release">
         <CompilerOptions>
           <Version Value="11"/>
-          <PathDelim Value="\"/>
           <Target>
             <Filename Value="MarkDownPad"/>
           </Target>
           <SearchPaths>
             <IncludeFiles Value="$(ProjOutDir)"/>
-            <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+            <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
           </SearchPaths>
           <Parsing>
             <SyntaxOptions>
@@ -103,62 +102,76 @@
           </Linking>
           <Other>
             <CustomOptions Value="-dBorland -dVer150 -dDelphi7 -dCompiler6_Up -dPUREPASCAL"/>
+            <ExecuteAfter>
+              <Command Value="sh tools/copy-lexlib.sh"/>
+            </ExecuteAfter>
           </Other>
         </CompilerOptions>
-      </Item3>
+      </Item>
     </BuildModes>
     <PublishOptions>
       <Version Value="2"/>
     </PublishOptions>
     <RunParams>
       <FormatVersion Value="2"/>
-      <Modes Count="1">
-        <Mode0 Name="default"/>
+      <Modes>
+        <Mode Name="default"/>
       </Modes>
     </RunParams>
-    <RequiredPackages Count="4">
-      <Item1>
-        <PackageName Value="ExceptionLogger"/>
-      </Item1>
-      <Item2>
-        <PackageName Value="LazActiveX"/>
-      </Item2>
-      <Item3>
+    <RequiredPackages>
+      <Item>
+        <PackageName Value="atsynedit_ex_package"/>
+      </Item>
+      <Item>
+        <PackageName Value="econtrol_package"/>
+      </Item>
+      <Item>
         <PackageName Value="atsynedit_package"/>
-      </Item3>
-      <Item4>
+      </Item>
+      <Item>
         <PackageName Value="LCL"/>
-      </Item4>
+      </Item>
+      <Item>
+        <PackageName Value="FrameViewer09"/>
+      </Item>
+      <Item>
+        <PackageName Value="printer4lazarus"/>
+      </Item>
+      <Item>
+        <PackageName Value="MyWiki"/>
+      </Item>
+      <Item>
+        <PackageName Value="markdown4d_lcl"/>
+      </Item>
     </RequiredPackages>
-    <Units Count="4">
-      <Unit0>
+    <Units>
+      <Unit>
         <Filename Value="MarkDownPad.lpr"/>
         <IsPartOfProject Value="True"/>
-      </Unit0>
-      <Unit1>
+      </Unit>
+      <Unit>
         <Filename Value="markdownviewer_src.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="Form1"/>
         <HasResources Value="True"/>
         <ResourceBaseClass Value="Form"/>
-      </Unit1>
-      <Unit2>
-        <Filename Value="MarkdownProcessor.pas"/>
+      </Unit>
+      <Unit>
+        <Filename Value="markdownprocessor.pas"/>
         <IsPartOfProject Value="True"/>
-      </Unit2>
-      <Unit3>
+      </Unit>
+      <Unit>
         <Filename Value="mshtml_4_0_tlb.pas"/>
         <IsPartOfProject Value="True"/>
         <UnitName Value="MSHTML_4_0_TLB"/>
-      </Unit3>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>
     <Version Value="11"/>
-    <PathDelim Value="\"/>
     <SearchPaths>
       <IncludeFiles Value="$(ProjOutDir)"/>
-      <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+      <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
     </SearchPaths>
     <Parsing>
       <SyntaxOptions>
@@ -166,6 +179,9 @@
       </SyntaxOptions>
     </Parsing>
     <Linking>
+      <Debugging>
+        <DebugInfoType Value="dsDwarf3"/>
+      </Debugging>
       <Options>
         <Win32>
           <GraphicApplication Value="True"/>
@@ -174,19 +190,22 @@
     </Linking>
     <Other>
       <CustomOptions Value="-dBorland -dVer150 -dDelphi7 -dCompiler6_Up -dPUREPASCAL"/>
+      <ExecuteAfter>
+        <Command Value="sh tools/copy-lexlib.sh"/>
+      </ExecuteAfter>
     </Other>
   </CompilerOptions>
   <Debugging>
-    <Exceptions Count="3">
-      <Item1>
+    <Exceptions>
+      <Item>
         <Name Value="EAbort"/>
-      </Item1>
-      <Item2>
+      </Item>
+      <Item>
         <Name Value="ECodetoolError"/>
-      </Item2>
-      <Item3>
+      </Item>
+      <Item>
         <Name Value="EFOpenError"/>
-      </Item3>
+      </Item>
     </Exceptions>
   </Debugging>
 </CONFIG>

@@ -95,3 +95,7 @@ bin/
 trace.log 
 .vscode/
 settings.ini
+# EControl lexer library: copied next to the binary by tools/copy-lexlib.sh
+lib.lxl
+# Release build output (Default/Debug write into lib/)
+/MarkDownPad
