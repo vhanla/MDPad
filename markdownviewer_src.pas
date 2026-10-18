@@ -2210,6 +2210,16 @@ const
 var
   Bmp: TBitmap;
   Painter: TMarkdownLclPainter;
+  // The painter also serves as the layout's text measurer. Hold it in an
+  // IPainter as well: FPC's interface table does not carry an ancestor
+  // interface, so `Painter as ITextMeasurer` raises EInvalidCast at run time
+  // even though IPainter descends from ITextMeasurer. Passing this IPainter
+  // value where an ITextMeasurer is expected is a plain upcast and works.
+  //
+  // Ownership: the interface reference is the owner. Never call Painter.Free
+  // while it exists -- FPC's TInterfacedObject.Free on a refcounted object
+  // raises EInvalidPointer -- release it by clearing PainterLifetime instead.
+  PainterLifetime: IPainter;
   Document: IMarkdownDocument;
   DisplayList: IMarkdownDisplayList;
   Theme: TMarkdownTheme;
@@ -2250,11 +2260,12 @@ begin
   try
     Bmp.SetSize(PageW, PageH);
     Painter := TMarkdownLclPainter.Create(Bmp.Canvas, PPI);
+    PainterLifetime := Painter;
     try
       Document := TMarkdown.Parse(BCEditor1.Text, TMarkdownDialect.Gfm);
       // The painter doubles as the text measurer (IPainter descends from
       // ITextMeasurer), so the layout and the drawing share one object.
-      DisplayList := TMarkdownLayoutEngine.LayoutDocument(Document, PageW, Theme, Painter as ITextMeasurer);
+      DisplayList := TMarkdownLayoutEngine.LayoutDocument(Document, PageW, Theme, PainterLifetime);
       if (DisplayList = nil) or (DisplayList.ItemCount = 0) then
         Exit;
       DocH := Ceil(DisplayList.Height);
@@ -2266,7 +2277,7 @@ begin
           // OriginY names the document Y that maps to the top of the canvas, and
           // the viewport is given in document coordinates (as the viewer does).
           Painter.OriginY := YTop;
-          TMarkdownDisplayListRenderer.Render(DisplayList, Painter as IPainter,
+          TMarkdownDisplayListRenderer.Render(DisplayList, PainterLifetime,
             TLayoutRectF.Create(0, YTop, PageW, YTop + PageH), Theme.BackgroundColor);
           Printer.Canvas.StretchDraw(Rect(0, 0, Printer.PageWidth, Printer.PageHeight), Bmp);
           Inc(YTop, PageH);
@@ -2277,7 +2288,11 @@ begin
         Printer.EndDoc;
       end;
     finally
-      Painter.Free;
+      // Release the painter through the interface (see the note at the top of
+      // this procedure): Painter must be cleared first, then the reference that
+      // actually owns the object.
+      Painter := nil;
+      PainterLifetime := nil;
     end;
   finally
     Bmp.Free;
