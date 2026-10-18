@@ -2072,6 +2072,11 @@ object Form1: TForm1
         Caption = '&Native Markdown'
         OnClick = toggleEngine
       end
+      object engMarkdown4DNative: TMenuItem
+        Tag = 7
+        Caption = 'Native &GFM (Markdown4D)'
+        OnClick = toggleEngine
+      end
     end
     object N3: TMenuItem
       Caption = '&?'

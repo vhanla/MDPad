@@ -23,6 +23,14 @@ Lazarus / Free Pascal markdown editor/viewer (MDPad). Cross-platform via `{$IFDE
 - `LazActiveX` was dropped from `RequiredPackages` (doesn't compile on Linux). Windows builds need it installed in the IDE for the IE path; the IDE auto-suggests adding the dependency.
 - `ExceptionLogger` was dropped (unused by our code, and its OPM copy fails to build on Linux: missing `dcconvertencoding.inc`).
 
+### Engines (`SelectedEngine`: markdown → HTML)
+
+- `mdNATIVE` (6, default): MyWiki's `TMarkdownConverter` (`WikiToHtml`), run in `TConversionThread`. It also fills the header list.
+- `mdMARKDOWN4D` (7, *Engines → Native GFM (Markdown4D)*): `TMarkdown.ToUnsafeHtml(src, TMarkdownDialect.Gfm)` from Markdown4D's **Core** — a second native (pure Pascal, no browser, no MyWiki) implementation, same worker thread. Its Core is plain Pascal and the shared pipeline cache is monitor-guarded, so calling it off the main thread is fine. `FHeaders` stays nil here: the code tree comes from the EControl adapter, not from the engine.
+- `mdPAGEDOWN`…`mdMARKDOWNIT` (1–5): JavaScript, so on Windows they force the IE backend (`UsingJsEngine`) whatever `SelectedPreview` says; off Windows they fall through to the native path.
+- `ToUnsafeHtml`, **not** `ToHtml`, on purpose: it keeps raw HTML, which is what MyWiki and the JS engines do *and* what the Markdown4D canvas draws (its layout engine lays out `HtmlBlock` nodes). The GFM **tag filter** stays on either way, so `<script>/<style>/<iframe>/<title>/<textarea>/…` get escaped — the exact list MyWiki escapes (`RegexDisallowdRawHtml`). `ToHtml` would instead drop every raw HTML block, and since `markdowntest.md` is mostly raw HTML the preview would lose most of its content. `PreviewHtmlBody` (Export HTML while the canvas backend is on) uses the same mode so the exported page matches the canvas.
+- `markdownprocessor.pas` (Delphi's `TMarkdownProcessor`) is still in the `uses` clause and the `.lpi` but is **never called** — the native engine has always been MyWiki. Left alone.
+
 ### Third preview backend: Markdown4D (`pvMARKDOWN4D`)
 
 - `~/projects/Markdown4D` is a CommonMark/GFM parser + **canvas** renderer (no browser). Its FPC/LCL port (`Source/Lcl`, targeted at FPC 3.3.1 + Lazarus trunk — the same toolchain as here) provides `TMarkdownViewer` in package `markdown4d_lcl`.

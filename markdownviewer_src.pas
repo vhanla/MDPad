@@ -130,6 +130,7 @@ type
   private
     FMarkdown: string;
     FRequestID: Int64;
+    FEngine: Integer;
     FHtmlResult: string;
     FHeaders: TObjectList<THeaderItem>;
     // Procedimiento que se sincronizará con la UI principal
@@ -137,7 +138,8 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(const AMarkdown: string; ARequestID: Int64);
+    constructor Create(const AMarkdown: string; ARequestID: Int64;
+      AEngine: Integer);
     destructor Destroy; override;
   end;
 
@@ -210,6 +212,7 @@ type
     engShowDown: TMenuItem;
     engMarkdownit: TMenuItem;
     engNative: TMenuItem;
+    engMarkdown4DNative: TMenuItem;
     mnuSyntax: TMenuItem;
     mnuTheme: TMenuItem;
     mnuCSS: TMenuItem;  procedure FormCreate(Sender: TObject);
@@ -286,6 +289,7 @@ type
     FWorker: TConversionThread; // último worker lanzado (nil cuando termina, ver ConversionTerminated)
     FShuttingDown: Boolean; // True durante FormDestroy: los workers no deben tocar la UI
     { Private declarations }
+    function UsingJsEngine: Boolean;
     function UsingIE: Boolean;
     function UsingMarkdown4D: Boolean;
     function ActivePreview: TWinControl;
@@ -332,6 +336,10 @@ const
   mdSHOWDOWN = 4;
   mdMARKDOWNIT = 5;
   mdNATIVE = 6;
+  // Markdown4D's own parser + HTML renderer (its Core units, no browser and no
+  // MyWiki involved). Native like mdNATIVE — same role, independent
+  // CommonMark/GFM implementation.
+  mdMARKDOWN4D = 7;
 // Which control renders the preview. Independent from SelectedEngine: the JS
 // engines force the IE backend on Windows, everything else honours this.
 const
@@ -467,23 +475,43 @@ var
   hi, nh: THeaderItem;
 begin
   try
-    md2 := TMarkdownConverter.Create;
-    try
-      md2.GiveIdToHeader := True;
-      FHtmlResult := md2.WikiToHtml(FMarkdown);
+    if FEngine = mdMARKDOWN4D then
+    begin
+      // Markdown4D renders markdown -> HTML in process: its Core is plain
+      // Pascal and the shared pipeline cache is monitor-guarded, so a worker
+      // thread is fine. No header list here: the code tree comes from the
+      // EControl adapter, not from the engine.
+      //
+      // UnsafeHtml (not ToHtml) on purpose: it keeps raw HTML in the document,
+      // which is what the other engines do (MyWiki; the JS ones on Windows) and
+      // what the Markdown4D canvas renders (`HtmlBlock` is laid out, see
+      // Markdown4D.Layout.Engine). The GFM tag filter is still applied by the
+      // pipeline, so <script>/<style>/<iframe>/... are escaped either way — the
+      // same list MyWiki escapes. ToHtml would instead drop every raw HTML
+      // block, so a document like markdowntest.md (mostly raw HTML) would lose
+      // most of its content.
+      FHtmlResult := TMarkdown.ToUnsafeHtml(FMarkdown, TMarkdownDialect.Gfm);
+    end
+    else
+    begin
+      md2 := TMarkdownConverter.Create;
+      try
+        md2.GiveIdToHeader := True;
+        FHtmlResult := md2.WikiToHtml(FMarkdown);
 
-      FHeaders := TObjectList<THeaderItem>.Create(True);
-      for hi in md2.Header.HeaderList do
-      begin
-        nh := THeaderItem.Create;
-        nh.Caption := hi.Caption;
-        nh.Id := hi.Id;
-        nh.Level := hi.Level;
-        nh.Line := hi.Line;
-        FHeaders.Add(nh);
+        FHeaders := TObjectList<THeaderItem>.Create(True);
+        for hi in md2.Header.HeaderList do
+        begin
+          nh := THeaderItem.Create;
+          nh.Caption := hi.Caption;
+          nh.Id := hi.Id;
+          nh.Level := hi.Level;
+          nh.Line := hi.Line;
+          FHeaders.Add(nh);
+        end;
+      finally
+        md2.Free;
       end;
-    finally
-      md2.Free;
     end;
 
     // Pasamos el resultado a la UI en el hilo principal.
@@ -496,13 +524,14 @@ begin
   end;
 end;
 
-constructor TConversionThread.Create(const AMarkdown: string; ARequestID: Int64
-  );
+constructor TConversionThread.Create(const AMarkdown: string; ARequestID: Int64;
+  AEngine: Integer);
 begin
   inherited Create(True); // Creado suspendido
   FreeOnTerminate := True;
   FMarkdown := AMarkdown;
   FRequestID := ARequestID;
+  FEngine := AEngine;
   FHeaders := nil;
 end;
 
@@ -805,6 +834,7 @@ begin
   engShowDown.Checked := False;
   engMarkdownit.Checked := False;
   engNative.Checked := False;
+  engMarkdown4DNative.Checked := False;
 
   case SelectedEngine of
     mdPAGEDOWN: engPageDown.Checked := True;
@@ -813,6 +843,7 @@ begin
     mdSHOWDOWN: engShowDown.Checked := True;
     mdMARKDOWNIT: engMarkdownit.Checked := True;
     mdNATIVE : engNative.Checked := True;
+    mdMARKDOWN4D: engMarkdown4DNative.Checked := True;
   end;
 end;
 
@@ -1489,6 +1520,13 @@ begin
     end;
 end;
 
+// True when the selected engine is one of the JavaScript ones: they need a real
+// browser, so on Windows they force the IE backend (see UsingIE).
+function TForm1.UsingJsEngine: Boolean;
+begin
+  Result := (SelectedEngine >= mdPAGEDOWN) and (SelectedEngine <= mdMARKDOWNIT);
+end;
+
 // True when the preview goes through the legacy IE ActiveX viewer
 // (Windows only, and only for the JavaScript engines; THtmlViewer
 // cannot run JavaScript, so it always uses the native engine).
@@ -1497,7 +1535,7 @@ begin
   {$IFDEF MSWINDOWS}
   // Picking a JS engine implies IE, whatever the selected preview backend is.
   Result := Assigned(Browser)
-    and ((SelectedPreview = pvIE) or (SelectedEngine <> mdNATIVE));
+    and ((SelectedPreview = pvIE) or UsingJsEngine);
   {$ELSE}
   Result := False;
   {$ENDIF}
@@ -1528,7 +1566,9 @@ end;
 function TForm1.PreviewHtmlBody: string;
 begin
   if UsingMarkdown4D then
-    Result := TMarkdown.ToHtml(BCEditor1.Text, TMarkdownDialect.Gfm)
+    // Unsafe (raw HTML kept), so the exported page matches what the canvas
+    // draws: the layout engine lays out HtmlBlock nodes instead of hiding them.
+    Result := TMarkdown.ToUnsafeHtml(BCEditor1.Text, TMarkdownDialect.Gfm)
   else
     Result := LastPreviewBody;
 end;
@@ -2264,7 +2304,7 @@ begin
    TInterlocked.Increment(FActiveTaskCount);
 
    // Instanciamos el hilo pasándole los datos necesarios
-   FWorker := TConversionThread.Create(BCEditor1.Text, FCurrentRequestID);
+   FWorker := TConversionThread.Create(BCEditor1.Text, FCurrentRequestID, SelectedEngine);
    FWorker.OnTerminate := ConversionTerminated;
    FWorker.Start; // Inicia la tarea
 end;
