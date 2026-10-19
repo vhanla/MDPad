@@ -371,6 +371,11 @@ type
     // makes its images change accordingly.
     procedure ApplyRemoteImagesSetting(Reload: Boolean);
     procedure ApplyViewMode;
+    // Leaves the panes in the order tree | tree splitter | editor | editor
+    // splitter | viewer by writing their Lefts, which is what the align pass
+    // sorts the alLeft controls by. The view-mode handlers own the widths,
+    // visibility and aligns; this only hands the pass the order.
+    procedure ArrangePanes;
     procedure UpdateCaretStatus;
     procedure PrintHtmlViewer;
     procedure PrintMarkdown4D;
@@ -765,13 +770,6 @@ begin
   Resultonly1.Checked:=False;
   EditorandResult1.Checked:=True;
 
-  BCEditor1.Visible:=True;
-  BCEditor1.Align:=alLeft;
-
-  ActivePreview.Visible:=True;
-  ActivePreview.Align:=alClient;
-  Splitter1.Enabled:=True;
-
   // let's disable wordwrap first, otherwise BCEditor will raise error
   // it might have to do with resizing width while wordwrap, weird
   prevwrdwrp := BCEditor1.OptWrapIndented;
@@ -782,8 +780,23 @@ begin
 //  Memo1.Width:=ClientWidth div 2;
 //  WebBrowser1.Width:=ClientWidth div 2;
   BCEditor1.Width:=Trunc(ViewersRatio/100*ClientWidth);
-  ActivePreview.Width:=ClientWidth-BCEditor1.Width;
-  Splitter1.Left:=ActivePreview.Left;
+
+  // Editor and viewer side by side with Splitter1 between them; the viewer is
+  // the alClient control, so it takes whatever the panes on the left leave.
+  DisableAlign;
+  try
+    BCEditor1.Visible:=True;
+    BCEditor1.Align:=alLeft;
+
+    ActivePreview.Visible:=True;
+    ActivePreview.Align:=alClient;
+    Splitter1.Visible:=True;
+    Splitter1.Enabled:=True;
+
+    ArrangePanes;
+  finally
+    EnableAlign;
+  end;
 
   try
   if not prevwas then
@@ -802,12 +815,25 @@ begin
   Editoronly1.Checked:=True;
   Resultonly1.Checked:=False;
   EditorandResult1.Checked:=False;
-  BCEditor1.Visible:=True;
-  ActivePreview.Align:=alNone;
-  BCEditor1.Align:=alClient;
-   
-  Splitter1.Enabled:=False;
-  ActivePreview.Visible:=False;
+
+  // The editor takes everything the tree leaves. Splitter1 only divides the
+  // editor from the viewer: with no viewer on screen it is visible but useless,
+  // and Visible is what takes it out of the layout (Enabled does not).
+  DisableAlign;
+  try
+    ActivePreview.Visible:=False;
+    ActivePreview.Align:=alNone;
+
+    BCEditor1.Visible:=True;
+    BCEditor1.Align:=alClient;
+
+    Splitter1.Visible:=False;
+    Splitter1.Enabled:=False;
+
+    ArrangePanes;
+  finally
+    EnableAlign;
+  end;
 
   //focus
   BCEditor1.SetFocus;
@@ -880,11 +906,25 @@ begin
   Editoronly1.Checked:=False;
   Resultonly1.Checked:=True;
   EditorandResult1.Checked:=False;
-  BCEditor1.Visible:=False;
-  ActivePreview.Visible:=True;
-  Splitter1.Enabled:=False;
-  BCEditor1.Align:=alNone;
-  ActivePreview.Align:=alClient;
+
+  // The viewer takes everything the tree leaves (see Editoronly1Click, same
+  // single-pane arrangement on the other side).
+  DisableAlign;
+  try
+    BCEditor1.Visible:=False;
+    BCEditor1.Align:=alNone;
+
+    ActivePreview.Visible:=True;
+    ActivePreview.Align:=alClient;
+
+    Splitter1.Visible:=False;
+    Splitter1.Enabled:=False;
+
+    ArrangePanes;
+  finally
+    EnableAlign;
+  end;
+
   {$IFDEF MSWINDOWS}
   //focus (IE ActiveX needs explicit UI activation)
   //good tricks at http://stackoverflow.com/a/918869/537347
@@ -1781,6 +1821,20 @@ begin
     // Images the old setting refused, or loaded, only change when the document
     // asks for them again.
     PreviewMd4D.ReloadImages;
+end;
+
+// The table of contents, then the editor, then the viewer, with a splitter
+// between each pair. LCL lays the alLeft controls out from left to right in the
+// order of their current Left, and setting an Align realigns on the spot, so
+// the lefts written here decide the order of the next pass. The editor is
+// created at runtime with Left 0: without this it is laid out before the tree
+// and the tree ends up on the right of it.
+procedure TForm1.ArrangePanes;
+begin
+  Tree.Left:=0;
+  Splitter2.Left:=Tree.Left+Tree.Width;
+  BCEditor1.Left:=Splitter2.Left+Splitter2.Width;
+  Splitter1.Left:=BCEditor1.Left+BCEditor1.Width;
 end;
 
 // Re-applies the checked view mode (editor/result/both) to the active
