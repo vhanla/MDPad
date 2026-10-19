@@ -93,11 +93,18 @@ uses
   ec_SyntAnal,
   ec_proc_lexer,
   HtmlView, HtmlGlobals,
+  // THtmlViewer keeps a name -> section map of the rendered HTML (the one an
+  // in-page link jump uses). The scroll sync reads the Y a heading was drawn at
+  // from it, since the viewer has no source-line map of its own.
+  HTMLSubs, HTMLUn2,
   // Markdown4D: alternative preview backend. It parses the markdown itself and
   // draws it on a canvas (no HTML, no browser), so it needs none of the
   // engine/HTML plumbing above.
   Markdown4D,
   Markdown4D.Defines,
+  // Where a scroll offset keeps a source line in view (the same helper the
+  // library's own editors use to follow an editor without yanking the preview).
+  Markdown4D.Editor.PreviewScroll,
   Markdown4D.Ast.Interfaces,
   Markdown4D.Theme,
   Markdown4D.Layout.Interfaces,
@@ -290,12 +297,43 @@ type
     FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
     FWorker: TConversionThread; // último worker lanzado (nil cuando termina, ver ConversionTerminated)
     FShuttingDown: Boolean; // True durante FormDestroy: los workers no deben tocar la UI
+
+    // Scroll sync state. Both panes follow each other and whichever one the user
+    // moved since the last tick drives the other, so these remember where each
+    // pane was left (see tmrScrollSyncerTimer). FSyncEditorLine = -1 means "the
+    // editor is authoritative again" (a new document or a re-render happened).
+    FSyncEditorLine: Integer;
+    FSyncCaretLine: Integer;
+    FSyncPreviewPos: Integer;
+    // The HTML preview has no source-line map, so its headings are used as
+    // anchor points: the engine reports the line each heading was written on and
+    // the viewer reports the exact Y it was drawn at. Lines between two headings
+    // are interpolated over their own stretch, so a picture or a table shifts
+    // only its own section instead of the whole mapping.
+    FSyncAnchorRange: Integer; // VScrollBarRange the anchors below were measured at
+    FSyncAnchorLine: array of Integer; // heading source lines, ascending
+    FSyncAnchorY: array of Integer; // their Y in the HTML preview
+    FHeaders: TObjectList<THeaderItem>; // headings of the HTML currently previewed
     { Private declarations }
     function UsingJsEngine: Boolean;
     function UsingIE: Boolean;
     function UsingMarkdown4D: Boolean;
     function ActivePreview: TWinControl;
     function PreviewHtmlBody: string;
+    // Scroll sync: the mapping never guesses, it asks the renderer.
+    function PreviewScrollPos: Integer;
+    procedure SetEditorTopLine(ALine: Integer);
+    procedure SyncEditorToPreview;
+    procedure SyncPreviewToEditor;
+    procedure InvalidateScrollSync;
+    // The HTML preview's anchor points (headings) and the lookups over them.
+    procedure AdoptHeaders(AList: TObjectList<THeaderItem>);
+    procedure InvalidateHtmlAnchors;
+    procedure EnsureHtmlAnchors;
+    procedure BuildHtmlAnchors;
+    procedure AddHtmlAnchor(ALine, AY: Integer);
+    function HtmlLineToY(ALine: Integer; out AY: Integer): Boolean;
+    function HtmlYToLine(AY: Integer; out ALine: Integer): Boolean;
     // Images the document names relative to itself have to resolve next to the
     // document, not relative to wherever MDPad was started from.
     procedure ApplyPreviewBaseFolder;
@@ -471,7 +509,17 @@ begin
    begin
      LastPreviewBody := FHtmlResult;
      PreviewHtml.Text := GITHUBCSS + FHtmlResult + '</body></html>';
-     //Form1.UpdateHeadersList(Form1.VirtualStringTree1, FHeaders, Form1.FHeaderListIndex, 6);
+     // The headings of the HTML just rendered are the anchor points the scroll
+     // sync needs; the form owns them from here on.
+     Form1.AdoptHeaders(FHeaders);
+     FHeaders := nil;
+     // A fresh load parks the preview at the top: put it back where the editor
+     // is right away instead of at the next tick (no jump while typing).
+     if Form1.Synceditwithpreview1.Checked then
+     begin
+       Form1.SyncEditorToPreview;
+       Form1.InvalidateScrollSync;
+     end;
      PreviewHtml.Cursor := crDefault;
      Form1.StatusBar1.Panels[1].Text := '';
    end;
@@ -1210,6 +1258,7 @@ begin
   end;
 //save ini settings
   SaveINI;
+  FreeAndNil(FHeaders);
   BCEditor1.Text := '';
   BCEditor1.Free;
   {$IFDEF MSWINDOWS}
@@ -1253,6 +1302,9 @@ procedure TForm1.FormResize(Sender: TObject);
 begin
   if EditorandResult1.Checked then
     EditorandResult1Click(Sender);
+  // The preview is laid out again at its new width, so every heading sits at a
+  // different Y: the anchor table has to be measured once more.
+  InvalidateHtmlAnchors;
   TrackBar1.Left:=ClientWidth-TrackBar1.Width-32;
   TrackBar1.Top:=ClientHeight-TrackBar1.Height;
 end;
@@ -1452,6 +1504,14 @@ begin
   if UsingMarkdown4D then
   begin
     PreviewMd4D.Text := BCEditor1.Text;
+    // Laying the document out again parks the viewer at the top, and it also
+    // moved every line: put the view back where the editor is, at once, so the
+    // preview does not jump on every keystroke.
+    if Synceditwithpreview1.Checked then
+    begin
+      SyncEditorToPreview;
+      InvalidateScrollSync;
+    end;
     Exit;
   end;
 
@@ -1486,6 +1546,15 @@ procedure TForm1.Synceditwithpreview1Click(Sender: TObject);
 begin
   Synceditwithpreview1.Checked:=not Synceditwithpreview1.Checked;
   tmrScrollSyncer.Enabled:=Synceditwithpreview1.Checked;
+  if Synceditwithpreview1.Checked then
+  begin
+    // Starting to follow: take the preview to the editor right away instead of
+    // at the next tick, and leave the editor as the reference (the preview may
+    // not be laid out yet, and then the tick redoes it).
+    InvalidateScrollSync;
+    SyncEditorToPreview;
+    InvalidateScrollSync;
+  end;
 end;
 
 procedure TForm1.SyncScrolling;
@@ -1629,6 +1698,10 @@ begin
     Editoronly1Click(Self)
   else if Resultonly1.Checked then
     Resultonly1Click(Self);
+  // Another control is on duty now: its scroll position has nothing to do with
+  // the one just recorded, so the editor drives the next sync.
+  InvalidateScrollSync;
+  InvalidateHtmlAnchors;
   //Print Preview needs a scriptable DOM, only the IE viewer has one
   PrintPreview1.Enabled := UsingIE;
 end;
@@ -1698,11 +1771,16 @@ begin
   if UsingMarkdown4D then
   begin
     PreviewMd4D.Text := DefaultText;
+    InvalidateScrollSync;
     Exit;
   end;
   // THtmlViewer path (default everywhere): synchronous full-document load,
   // the native engine renders the markdown on UpdateResult
   PreviewHtml.LoadFromString(HEADER + PreviewCSS + OPENCONTAINER + DefaultText + CLOSECONTAINER + FOOTER);
+  // LoadEngine runs on a new document (or a backend switch), so the heading list
+  // and the anchor table of the previous one no longer describe the preview.
+  AdoptHeaders(nil);
+  InvalidateScrollSync;
 end;
 
 procedure TForm1.EditorChangeCaretPos(Sender: TObject);
@@ -1968,51 +2046,344 @@ begin
 end;
 {$ENDIF}
 
+// Which pane the user moved last, so both follow each other. The mapping never
+// guesses: the canvas backend maps a source line to the Y it was laid out at
+// (pictures, tables and code blocks included), and THtmlViewer, which has no
+// line map, is driven from the headings of the HTML it has rendered.
 procedure TForm1.tmrScrollSyncerTimer(Sender: TObject);
+begin
+  if not ((Synceditwithpreview1.Checked) and (BCEditor1.Visible)
+  and (ActivePreview.Visible)) then
+    Exit;
+
+  // Typing moves the caret and re-renders the preview in the same instant, so
+  // the editor wins whenever both look moved; the other way round the preview
+  // would drag the markdown back to where the re-render left it.
+  if (BCEditor1.LineTop <> FSyncEditorLine)
+  or ((BCEditor1.Carets.Count > 0) and (BCEditor1.Carets[0].PosY <> FSyncCaretLine)) then
+    SyncEditorToPreview
+  else if PreviewScrollPos <> FSyncPreviewPos then
+    SyncPreviewToEditor;
+end;
+
+// Where the active preview is scrolled to, in whatever unit its backend uses.
+// Only the tick reads it, to tell which of the two panes the user moved.
+function TForm1.PreviewScrollPos: Integer;
+begin
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+    Exit(SyncPercentage); // a scriptable DOM reports nothing back
+  {$ENDIF}
+  if UsingMarkdown4D then
+    Exit(Round(PreviewMd4D.ScrollOffset));
+  Result := PreviewHtml.VScrollBarPosition;
+end;
+
+// Scrolling the editor, never moving the caret: the preview follows what is
+// being read, not where the cursor was left.
+procedure TForm1.SetEditorTopLine(ALine: Integer);
+begin
+  if ALine < 0 then
+    ALine := 0;
+  if ALine > BCEditor1.Strings.Count - 1 then
+    ALine := BCEditor1.Strings.Count - 1;
+  if BCEditor1.LineTop <> ALine then
+    BCEditor1.LineTop := ALine;
+end;
+
+// A new document, a re-render or another backend leaves the mapping pointing at
+// content that is no longer on screen: the editor becomes the reference again.
+procedure TForm1.InvalidateScrollSync;
+begin
+  FSyncEditorLine := -1;
+end;
+
+// Puts what the editor is reading at the top of the preview. The caret line is
+// only pushed into view when it would fall outside, which is what keeps the
+// preview steady while typing (TMarkdownPreviewScroll.OffsetShowingLine).
+procedure TForm1.SyncEditorToPreview;
 var
-  percentage, LineCount: integer;
+  TopLine, CaretLine, LineCount, percentage: Integer;
+  Target: Single;
+  TargetY, CaretY, CaretBottomY: Integer;
   {$IFDEF MSWINDOWS}
   js: string;
   {$ENDIF}
 begin
+  TopLine := BCEditor1.LineTop;
+  if BCEditor1.Carets.Count > 0 then
+    CaretLine := BCEditor1.Carets[0].PosY
+  else
+    CaretLine := TopLine;
 
-  if (Synceditwithpreview1.Checked) and (BCEditor1.Visible)
-  and (ActivePreview.Visible) then
+  {$IFDEF MSWINDOWS}
+  // A scriptable DOM has no line map either, so the JS engines keep the coarse
+  // line ratio: they are the one backend nothing better can drive.
+  if UsingIE then
   begin
-    // Markdown4D maps a source line to a scroll offset exactly, so the editor
-    // caret line can be pinned to the top of the preview.
-    if UsingMarkdown4D then
-    begin
-      PreviewMd4D.ScrollOffset := PreviewMd4D.SourceLineToScrollOffset(BCEditor1.Carets[0].PosY);
-      Exit;
-    end;
-
-    //editor position as caret-line ratio (Win32 GetScrollInfo is gone)
     LineCount := BCEditor1.Strings.Count - 1;
     if LineCount < 1 then
       LineCount := 1;
-    percentage := BCEditor1.Carets[0].PosY * 100 div LineCount;
+    percentage := TopLine * 100 div LineCount;
     if percentage < 0 then
       percentage := 0
     else if percentage > 100 then
       percentage := 100;
 
-    if SyncPercentage<>percentage then
+    if SyncPercentage <> percentage then
     begin
-      SyncPercentage:=percentage;
-      {$IFDEF MSWINDOWS}
-      if UsingIE then
+      SyncPercentage := percentage;
       try
         js := 'document.documentElement.scrollTop='+inttostr(percentage)+'/100*document.documentElement.scrollHeight';
         ExecuteScript(Browser.ComServer.Document as IHTMLDOcument2, js, 'javascript');
       except
-      end
-      else
-      {$ENDIF}
+      end;
+    end;
+
+    FSyncEditorLine := TopLine;
+    FSyncCaretLine := CaretLine;
+    FSyncPreviewPos := SyncPercentage;
+    Exit;
+  end;
+  {$ENDIF}
+
+  if UsingMarkdown4D then
+  begin
+    // Exact: every rendered line knows the source line it came from, so the
+    // editor's top line is pinned to the top and the caret line only pulled in.
+    Target := TMarkdownPreviewScroll.OffsetShowingLine(
+      PreviewMd4D.SourceLineToScrollOffset(TopLine),
+      PreviewMd4D.SourceLineToScrollOffset(CaretLine),
+      PreviewMd4D.SourceLineToScrollOffset(CaretLine + 1),
+      PreviewMd4D.ClientHeight);
+    if not SameValue(PreviewMd4D.ScrollOffset, Target) then
+      PreviewMd4D.ScrollOffset := Target;
+  end
+  else
+  begin
+    // Same "keep the line in view" rule, in pixels: the heading anchors say
+    // where each line is, so an image above it cannot skew the result.
+    if HtmlLineToY(TopLine, TargetY) then
+    begin
+      if HtmlLineToY(CaretLine, CaretY) and HtmlLineToY(CaretLine + 1, CaretBottomY) then
+        TargetY := Round(TMarkdownPreviewScroll.OffsetShowingLine(TargetY, CaretY, CaretBottomY,
+          PreviewHtml.ClientHeight));
       if PreviewHtml.VScrollBarRange > 0 then
-        PreviewHtml.VScrollBarPosition := percentage * PreviewHtml.VScrollBarRange div 100;
+        PreviewHtml.VScrollBarPosition := Max(0, Min(TargetY, PreviewHtml.VScrollBarRange));
+    end
+    else if PreviewHtml.VScrollBarRange > 0 then
+    begin
+      // Nothing to anchor on (the HTML has no headings): line ratio, as before.
+      LineCount := BCEditor1.Strings.Count - 1;
+      if LineCount < 1 then
+        LineCount := 1;
+      PreviewHtml.VScrollBarPosition := TopLine * PreviewHtml.VScrollBarRange div LineCount;
     end;
   end;
+
+  FSyncEditorLine := TopLine;
+  FSyncCaretLine := CaretLine;
+  FSyncPreviewPos := PreviewScrollPos;
+end;
+
+// The other way round: what the preview shows at its top becomes the editor's
+// top line, so scrolling the rendered document moves the markdown with it.
+procedure TForm1.SyncPreviewToEditor;
+var
+  Line, LineCount: Integer;
+begin
+  {$IFDEF MSWINDOWS}
+  if UsingIE then
+    Exit; // one-way on the JS engines
+  {$ENDIF}
+
+  if UsingMarkdown4D then
+    Line := PreviewMd4D.ScrollOffsetToSourceLine(PreviewMd4D.ScrollOffset)
+  else if not HtmlYToLine(PreviewHtml.VScrollBarPosition, Line) then
+  begin
+    LineCount := BCEditor1.Strings.Count - 1;
+    if LineCount < 1 then
+      LineCount := 1;
+    if PreviewHtml.VScrollBarRange > 0 then
+      Line := PreviewHtml.VScrollBarPosition * LineCount div PreviewHtml.VScrollBarRange
+    else
+      Line := 0;
+  end;
+
+  SetEditorTopLine(Line);
+  FSyncEditorLine := BCEditor1.LineTop;
+  if BCEditor1.Carets.Count > 0 then
+    FSyncCaretLine := BCEditor1.Carets[0].PosY;
+  FSyncPreviewPos := PreviewScrollPos;
+end;
+
+// The worker that rendered the HTML hands its headings over: they carry the
+// source line and the id each heading was written with, which is what the viewer
+// is later asked to scroll to.
+procedure TForm1.AdoptHeaders(AList: TObjectList<THeaderItem>);
+begin
+  FreeAndNil(FHeaders);
+  FHeaders := AList;
+  InvalidateHtmlAnchors;
+end;
+
+procedure TForm1.InvalidateHtmlAnchors;
+begin
+  FSyncAnchorRange := -1; // the table describes HTML that is going away
+end;
+
+procedure TForm1.EnsureHtmlAnchors;
+begin
+  if FSyncAnchorRange = PreviewHtml.VScrollBarRange then
+    Exit;
+  BuildHtmlAnchors;
+end;
+
+// Measures the anchor table: the two ends of the document plus every heading the
+// rendered HTML actually has. The viewer keeps a name -> section map of what it
+// parsed (the one an in-page link jump uses) and reports the exact Y each
+// heading was drawn at, so no height is ever estimated.
+procedure TForm1.BuildHtmlAnchors;
+var
+  Index, At, Y, LastLine: Integer;
+  Names: TIDObjectList;
+begin
+  SetLength(FSyncAnchorLine, 0);
+  SetLength(FSyncAnchorY, 0);
+  FSyncAnchorRange := PreviewHtml.VScrollBarRange;
+  if (FHeaders = nil) or (FHeaders.Count = 0) or (PreviewHtml.SectionList = nil) then
+    Exit;
+
+  Names := PreviewHtml.SectionList.IDNameList;
+  if Names = nil then
+    Exit;
+
+  AddHtmlAnchor(0, 0);
+  for Index := 0 to FHeaders.Count - 1 do
+  begin
+    if FHeaders[Index].Id = '' then
+      Continue;
+    // The viewer stores the ids it parsed and compares without case, so the id
+    // MDPad knows is enough (and it keeps accents intact: no case mangling).
+    At := Names.IndexOf(FHeaders[Index].Id);
+    if At < 0 then
+      Continue;
+    Y := Names.Objects[At].YPosition;
+    AddHtmlAnchor(FHeaders[Index].Line, Y);
+  end;
+
+  LastLine := BCEditor1.Strings.Count - 1;
+  if LastLine < 0 then
+    LastLine := 0;
+  AddHtmlAnchor(LastLine, PreviewHtml.VScrollBarRange);
+end;
+
+// Keeps the table sorted and strictly increasing in both line and Y; anything
+// that would break that (two headings on one line, a heading above the previous
+// one) is dropped instead of bending the interpolation.
+procedure TForm1.AddHtmlAnchor(ALine, AY: Integer);
+var
+  Count: Integer;
+begin
+  if ALine < 0 then
+    ALine := 0;
+  if AY < 0 then
+    AY := 0;
+  Count := Length(FSyncAnchorLine);
+  if (Count > 0)
+  and ((ALine <= FSyncAnchorLine[Count - 1]) or (AY < FSyncAnchorY[Count - 1])) then
+    Exit;
+  SetLength(FSyncAnchorLine, Count + 1);
+  SetLength(FSyncAnchorY, Count + 1);
+  FSyncAnchorLine[Count] := ALine;
+  FSyncAnchorY[Count] := AY;
+end;
+
+// The Y the HTML preview draws a source line at, interpolated inside the stretch
+// between the two headings around it. False when the document has no headings to
+// anchor on, which is when the caller falls back to the line ratio.
+function TForm1.HtmlLineToY(ALine: Integer; out AY: Integer): Boolean;
+var
+  Index, Count, FromLine, ToLine: Integer;
+begin
+  AY := 0;
+  EnsureHtmlAnchors;
+  Count := Length(FSyncAnchorLine);
+  if Count < 2 then
+    Exit(False);
+
+  if ALine <= FSyncAnchorLine[0] then
+  begin
+    AY := FSyncAnchorY[0];
+    Result := True;
+    Exit;
+  end;
+  if ALine >= FSyncAnchorLine[Count - 1] then
+  begin
+    AY := FSyncAnchorY[Count - 1];
+    Result := True;
+    Exit;
+  end;
+
+  for Index := 0 to Count - 2 do
+  begin
+    FromLine := FSyncAnchorLine[Index];
+    ToLine := FSyncAnchorLine[Index + 1];
+    if (ALine >= FromLine) and (ALine <= ToLine) then
+    begin
+      AY := FSyncAnchorY[Index]
+        + ((ALine - FromLine) * (FSyncAnchorY[Index + 1] - FSyncAnchorY[Index])
+           div Max(1, ToLine - FromLine));
+      Result := True;
+      Exit;
+    end;
+  end;
+
+  AY := FSyncAnchorY[Count - 1];
+  Result := True;
+end;
+
+// The inverse, so scrolling the preview moves the editor to the line then on
+// screen.
+function TForm1.HtmlYToLine(AY: Integer; out ALine: Integer): Boolean;
+var
+  Index, Count, FromY, ToY: Integer;
+begin
+  ALine := 0;
+  EnsureHtmlAnchors;
+  Count := Length(FSyncAnchorY);
+  if Count < 2 then
+    Exit(False);
+
+  if AY <= FSyncAnchorY[0] then
+  begin
+    ALine := FSyncAnchorLine[0];
+    Result := True;
+    Exit;
+  end;
+  if AY >= FSyncAnchorY[Count - 1] then
+  begin
+    ALine := FSyncAnchorLine[Count - 1];
+    Result := True;
+    Exit;
+  end;
+
+  for Index := 0 to Count - 2 do
+  begin
+    FromY := FSyncAnchorY[Index];
+    ToY := FSyncAnchorY[Index + 1];
+    if (AY >= FromY) and (AY <= ToY) then
+    begin
+      ALine := FSyncAnchorLine[Index]
+        + ((AY - FromY) * (FSyncAnchorLine[Index + 1] - FSyncAnchorLine[Index])
+           div Max(1, ToY - FromY));
+      Result := True;
+      Exit;
+    end;
+  end;
+
+  ALine := FSyncAnchorLine[Count - 1];
+  Result := True;
 end;
 
 procedure TForm1.TrackBar1Change(Sender: TObject);
@@ -2063,6 +2434,8 @@ begin
     else if pos > High(ZoomPct) then
       pos := High(ZoomPct);
     PreviewMd4D.Zoom := ZoomPct[pos];
+    // Every line just moved: measure the mapping again from the editor.
+    InvalidateScrollSync;
     Exit;
   end;
   //THtmlViewer has no optical zoom: scale the default font size instead
@@ -2072,6 +2445,8 @@ begin
   else if pos > High(ZoomPct) then
     pos := High(ZoomPct);
   PreviewHtml.DefFontSize := PreviewBaseFontSize * ZoomPct[pos] div 100;
+  InvalidateScrollSync;
+  InvalidateHtmlAnchors;
 end;
 
 procedure TForm1.Undo1Click(Sender: TObject);
