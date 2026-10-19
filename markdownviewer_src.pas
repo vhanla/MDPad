@@ -1341,6 +1341,9 @@ end;
 
 procedure TForm1.FormDestroy(Sender: TObject);
 begin
+  // Settings first: the picks are already on disk (TogglePreview/ToggleEngine
+  // save them), but the rest must not depend on a worker deciding to stop.
+  SaveINI;
   // Avisar a los workers y esperarlos: su Synchronize necesita que el main
   // bombee la cola, y SyncUpdateUI sale temprano gracias a FShuttingDown.
   // Sin esto, un worker vivo tocaría PreviewHtml/Form1 ya liberados -> GPF.
@@ -1350,8 +1353,6 @@ begin
     CheckSynchronize(0);
     Sleep(5);
   end;
-//save ini settings
-  SaveINI;
   FreeAndNil(FHeaders);
   ClearTOC;
   BCEditor1.Text := '';
@@ -2084,14 +2085,17 @@ begin
 
       TrackBar1_Position:= ini.ReadInteger('Preview','zoom',2);
 
-      SelectedEngine := ini.ReadInteger('MDPad', 'engine', 6); //default set to native
+      // What the last session picked (View -> Preview: ... and Engines). A
+      // settings.ini from another build, or one carried over from Windows, can
+      // carry a viewer or an engine this one does not have: fall back rather
+      // than leave the preview with no control behind it.
+      SelectedEngine := ini.ReadInteger('MDPad', 'engine', mdNATIVE);
+      if (SelectedEngine < mdPAGEDOWN) or (SelectedEngine > mdMARKDOWN4D) then
+        SelectedEngine := mdNATIVE;
       SelectedPreview := ini.ReadInteger('MDPad', 'preview', pvHTML);
-      {$IFNDEF MSWINDOWS}
-      // The IE backend only exists on Windows; a settings.ini carried over from
-      // a Windows run must not leave the preview without a control.
-      if SelectedPreview = pvIE then
+      if (SelectedPreview <> pvHTML) and (SelectedPreview <> pvMARKDOWN4D)
+      {$IFDEF MSWINDOWS} and (SelectedPreview <> pvIE) {$ENDIF} then
         SelectedPreview := pvHTML;
-      {$ENDIF}
 
       mnuSyntax.Checked := ini.ReadBool('MDPad', 'syntaxenabled', false);
       mnuTheme.Checked := ini.ReadBool('MDPad', 'themeenabled', false);
@@ -2194,6 +2198,10 @@ begin
 
     SelectedEngine := TMenuItem(Sender).Tag;
     UpdateEngineInMenu;
+    // The picked engine is what the next start should use, so it goes to disk
+    // right here: the save on exit never runs if the process is killed, crashes
+    // or hangs on a worker.
+    SaveINI;
     LoadEngine;
     {$IFDEF MSWINDOWS}
     if UsingIE then
@@ -2219,6 +2227,8 @@ begin
   begin
     SelectedPreview := TMenuItem(Sender).Tag;
     UpdatePreviewInMenu;
+    // Same as the engine pick: remember the backend at once, not only on exit.
+    SaveINI;
     LoadEngine;
     UpdateResult;
     ApplyViewMode;
