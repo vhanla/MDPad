@@ -2,9 +2,14 @@
   This file contains the HTML generated templates as well the javascript
   markdown engines, the usage should be as follows:
 
-  HEADER + CSS + DEMOTEXT + ENGINE + FOOTER
+  HEADER + PreviewCSS + DEMOTEXT + ENGINE + FOOTER
   Alternatively
-  HEADER + CSS + ANYHTML TEXT + FOOTER
+  HEADER + PreviewCSS + ANYHTML TEXT + FOOTER
+
+  PreviewCSS is built at run time from one of the HTMLCSS* style sheets below,
+  picked by the app theme (see TForm1.RefreshPreviewStyle), plus the user's
+  style.css when Preferences > "Enable Custom Style" is on. The sheets are CSS
+  text only: whoever composes the head closes the <style> tag and the head.
 
   ENGINES
   - PAGEDOWN
@@ -154,9 +159,38 @@ FOOTER ='	<script type="text/javascript">'
 +#13'    </body>'
 +#13'</html>';
 
-// STYLE TO INCLUDE IN HEAD TAG
+// STYLE SHEETS
+//
+// One sheet per app theme. Both are GitHub's markdown look: the light one is
+// what GitHub renders in a browser's light mode, the dark one is its dark
+// mode. Only CSS 1 / 2.1 properties are used (THtmlViewer supports no more),
+// so :nth-child and border-radius are commented out or left out where they
+// would matter.
 
-CSS = '<style type="text/css">'
+HTMLCSSLIGHT = '<style type="text/css">'
++#13'body{background-color:#ffffff;color:#1f2328;font-family:sans-serif;font-size:11pt;line-height:1.6;margin:20px;}'
++#13'h1,h2,h3,h4,h5,h6{font-weight:bold;color:#1f2328;margin-top:24px;margin-bottom:16px;border-bottom:1px solid #d1d9e0;padding-bottom:6px;}'
++#13'h1{font-size:2em;}'
++#13'h2{font-size:1.5em;}'
++#13'h3{font-size:1.25em;}'
++#13'h4{font-size:1em;}'
++#13'h3,h4,h5,h6{border-bottom:none;}'
++#13'p{margin-top:0;margin-bottom:16px;}'
++#13'a{color:#0969da;text-decoration:none;}'
++#13'a:hover{text-decoration:underline;}'
++#13'strong,b{font-weight:bold;}'
++#13'em,i{font-style:italic;}'
++#13'hr{height:1px;background-color:#d1d9e0;border:0;margin:24px 0;}'
++#13'code{font-family:monospace;font-size:0.9em;background-color:#eff1f3;padding:2px 5px;}'
++#13'pre{background-color:#f6f8fa;border:1px solid #d1d9e0;padding:16px;white-space:pre;font-size:0.9em;}'
++#13'pre code{background-color:transparent;padding:0;border:none;}'
++#13'blockquote{margin-left:0;padding-left:15px;border-left:4px solid #d1d9e0;color:#59636e;}'
++#13'ul,ol{padding-left:30px;margin-bottom:16px;}'
++#13'li{margin-bottom:5px;}'
++#13'table{border-collapse:collapse;width:100%;margin-bottom:16px;}'
++#13'th,td{border:1px solid #d1d9e0;padding:6px 13px;text-align:left;}'
++#13'th{font-weight:bold;background-color:#f6f8fa;}'
++#13'img{max-width:100%;height:auto;}'
 +#13'.md{padding-top:10px;padding-bottom:10px;}'
 +#13'.md{font-size:14px;line-height:1.6;}'
 +#13'.md>*:first-child{margin-top:0!important;}'
@@ -221,10 +255,153 @@ CSS = '<style type="text/css">'
 +#13'.md .highlight pre,.md pre{background-color:#f8f8f8;border:1px solid #ccc;font-size:13px;line-height:19px;overflow:auto;padding:6px 10px;border-radius:3px;}'
 +#13'.md pre code,.md pre tt{background-color:transparent;border:none;}'
 +#13'#readme .md,#readme .plain{background-color:#fff;border:1px solid #CACACA;padding:30px;}'
-+#13''
-+#13'	</style>'
-+#13'    </head>'
-+#13'    ';
++#13'';
+
+HTMLCSSDARK = '<style type="text/css">' +
+  '/* ' +
+  '  GitHub-Flavored Dark Mode CSS for THTMLViewer ' +
+  '  - Uses only CSS 1 / 2.1 properties known to be well-supported. ' +
+  '  - Focuses on typography, spacing, and color for a modern feel. ' +
+  '*/ ' +
+  ' ' +
+  'body { ' +
+  '    background-color: #0d1117; /* Very dark blue-gray, like GitHub */ ' +
+  '    color: #c9d1d9;             /* Light gray for main text */ ' +
+  '    font-family: sans-serif;    /* Relies on system''s default sans-serif font */ ' +
+  '    font-size: 11pt; ' +
+  '    line-height: 1.6; ' +
+  '    margin: 20px;               /* Give the whole document some breathing room */ ' +
+  '} ' +
+  ' ' +
+  '/* --- Headings --- */ ' +
+  'h1, h2, h3, h4, h5, h6 { ' +
+  '    font-weight: bold; ' +
+  '    color: #ffffff;             /* Brighter white for headings */ ' +
+  '    margin-top: 24px; ' +
+  '    margin-bottom: 16px; ' +
+  '    border-bottom: 1px solid #30363d; /* Subtle separator line */ ' +
+  '    padding-bottom: 6px; ' +
+  '} ' +
+  ' ' +
+  'h1 { font-size: 2em; } ' +
+  'h2 { font-size: 1.5em; } ' +
+  'h3 { font-size: 1.25em; } ' +
+  'h4 { font-size: 1em; } ' +
+  ' ' +
+  '/* Remove the border from smaller headings */ ' +
+  'h3, h4, h5, h6 { ' +
+  '    border-bottom: none; ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Basic Typography --- */ ' +
+  'p { ' +
+  '    margin-top: 0; ' +
+  '    margin-bottom: 16px; /* Vertical spacing for paragraphs */ ' +
+  '} ' +
+  ' ' +
+  'a { ' +
+  '    color: #58a6ff;         /* Bright blue for links */ ' +
+  '    text-decoration: none;  /* Modern look, no underline by default */ ' +
+  '} ' +
+  ' ' +
+  'a:hover { ' +
+  '    text-decoration: underline; /* Underline on hover for discoverability */ ' +
+  '} ' +
+  ' ' +
+  'strong, b { ' +
+  '    font-weight: bold; ' +
+  '} ' +
+  ' ' +
+  'em, i { ' +
+  '    font-style: italic; ' +
+  '} ' +
+  ' ' +
+  'hr { ' +
+  '    height: 1px; ' +
+  '    background-color: #30363d; /* Darker gray for horizontal rules */ ' +
+  '    border: 0; ' +
+  '    margin: 24px 0; ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Code Blocks & Inline Code --- */ ' +
+  '/* Inline code like `this` */ ' +
+  'code { ' +
+  '    font-family: monospace; ' +
+  '    font-size: 0.9em; ' +
+  '    background-color: #404040; ' +
+  '    padding: 2px 5px; ' +
+  '    /* border-radius is not supported, but good practice to include */ ' +
+  '    /* border-radius: 3px; */ ' +
+  '} ' +
+  ' ' +
+  '/* Fenced code blocks */ ' +
+  'pre { ' +
+  '    background-color: #161b22; ' +
+  '    border: 1px solid #30363d; ' +
+  '    padding: 16px; ' +
+  '    white-space: pre; /* Essential for preserving code formatting */ ' +
+  '    font-size: 0.9em; ' +
+  '    /* overflow: auto; is not fully supported, but the viewer adds scrollbars if needed */ ' +
+  '} ' +
+  ' ' +
+  '/* The <code> tag inside a <pre> block should not have its own box style */ ' +
+  'pre code { ' +
+  '    background-color: transparent; ' +
+  '    padding: 0; ' +
+  '    border: none; ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Blockquotes --- */ ' +
+  'blockquote { ' +
+  '    margin-left: 0; ' +
+  '    padding-left: 15px; ' +
+  '    border-left: 4px solid #30363d; ' +
+  '    color: #8b949e; /* Muted text color for quotes */ ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Lists --- */ ' +
+  'ul, ol { ' +
+  '    padding-left: 30px; ' +
+  '    margin-bottom: 16px; ' +
+  '} ' +
+  ' ' +
+  'li { ' +
+  '    margin-bottom: 5px; /* Spacing between list items */ ' +
+  '} ' +
+  ' ' +
+  ' ' +
+  '/* --- Tables --- */ ' +
+  'table { ' +
+  '    border-collapse: collapse; ' +
+  '    width: 100%; ' +
+  '    margin-bottom: 16px; ' +
+  '} ' +
+  ' ' +
+  'th, td { ' +
+  '    border: 1px solid #30363d; ' +
+  '    padding: 6px 13px; ' +
+  '    text-align: left; ' +
+  '} ' +
+  ' ' +
+  'th { ' +
+  '    font-weight: bold; ' +
+  '    background-color: #161b22; ' +
+  '} ' +
+  ' ' +
+  '/* Alternating row colors for readability */ ' +
+  '/* Note: :nth-child is NOT supported, this is for other renderers. ' +
+  '   THTMLViewer will just show all rows with the default td background. */ ' +
+  'tr:nth-child(2n) { ' +
+  '    background-color: #161b22; ' +
+  '} ' +
+  'img {max-width: 100%; height: auto; } ' +
+  'table { width: 100%; border-collapse: collapse;} '+
+  'th, td { width: 100%; }' +
+  #13'#readme .md{background-color:#0d1117;border:1px solid #30363d;padding:30px;}';
 
 {ENGINES}
 
@@ -799,9 +976,9 @@ MARKED = '<script type="text/javascript">'
 'nction(e,t){var n=s(t.href),r=t.title?s(t.title):null;return"!"!==e[0].charAt(0)' +
 '?this.renderer.link(n,r,this.output(e[1])):this.renderer.image(n,r,s(e[1]))},t.p' +
 'rototype.smartypants=function(e){return this.options.smartypants?e.replace(/---/' +
-'g,"—").replace(/--/g,"–").replace(/(^|[-\u2014\/(\[{"\s])''/g,"$1‘").replace(/''/g' +
-',"’").replace(/(^|[-\u2014\/(\[{\u2018\s])"/g,"$1“").replace(/"/g,"”").replace(/' +
-'\.{3}/g,"…"):e},t.prototype.mangle=function(e){if(!this.options.mangle)return e;' +
+'g,"ï¿½").replace(/--/g,"ï¿½").replace(/(^|[-\u2014\/(\[{"\s])''/g,"$1ï¿½").replace(/''/g' +
+',"ï¿½").replace(/(^|[-\u2014\/(\[{\u2018\s])"/g,"$1ï¿½").replace(/"/g,"ï¿½").replace(/' +
+'\.{3}/g,"ï¿½"):e},t.prototype.mangle=function(e){if(!this.options.mangle)return e;' +
 'for(var t,n="",r=e.length,s=0;r>s;s++)t=e.charCodeAt(s),Math.random()>.5&&(t="x"' +
 '+t.toString(16)),n+="&#"+t+";";return n},n.prototype.code=function(e,t,n){if(thi' +
 's.options.highlight){var r=this.options.highlight(e,t);null!=r&&r!==e&&(n=!0,e=r' +
@@ -2585,307 +2762,6 @@ ABOUTMDPAD = 'MDPad v 1.3.3 beta'
 +#13' Source Code on their github repo, no modified';
 
 
-DEFAULTTHEME = '{ ' +
-'   "Colors": { ' +
-'      "Info": { ' +
-'         "General": { ' +
-'            "Version": "1.6.0", ' +
-'            "Date": "21.05.2016" ' +
-'         }, ' +
-'         "Author": { ' +
-'            "Name": "Lasse Rautiainen", ' +
-'            "Mail": "lasse@bonecode.com" ' +
-'         } ' +
-'      }, ' +
-'      "Editor": { ' +
-'         "Colors": { ' +
-'            "Background": "$00FFFFFF", ' +
-'            "ActiveLineBackground": "$00FFFFFF", ' +
-'            "CodeFoldingActiveLineBackground": "$00FFFFFF", ' +
-'            "CodeFoldingBackground": "$00FFFFFF", ' +
-'            "CodeFoldingCollapsedLine": "$009F9F9F", ' +
-'            "CodeFoldingFoldingLine": "$009F9F9F", ' +
-'            "CodeFoldingFoldingLineHighlight": "$009F9F9F", ' +
-'            "CodeFoldingIndent": "$00414746", ' +
-'            "CodeFoldingIndentHighlight": "$00414746", ' +
-'            "CodeFoldingHintBackground": "$00FFFFFF", ' +
-'            "CodeFoldingHintBorder": "$00414746", ' +
-'            "CodeFoldingHintText": "$00F8F8F2", ' +
-'            "CompletionProposalBackground": "$00FFFFFF", ' +
-'            "CompletionProposalForeground": "$00F8F8F2", ' +
-'            "CompletionProposalSelectedBackground": "$003E4849", ' +
-'            "CompletionProposalSelectedText": "clHighlightText", ' +
-'            "LeftMarginActiveLineBackground": "$00FFFFFF", ' +
-'            "LeftMarginBackground": "$00FFFFFF", ' +
-'            "LeftMarginBorder": "$00222827", ' +
-'            "LeftMarginLineNumberLine": "$009F9F9F", ' +
-'            "LeftMarginLineNumbers": "$009F9F9F", ' +
-'            "LeftMarginLineStateModified": "$0074DBE6", ' +
-'            "LeftMarginLineStateNormal": "$002EE2A6", ' +
-'            "LeftMarginBookmarkPanel": "$00FFFFFF", ' +
-'            "MatchingPairMatched": "$007226F9", ' +
-'            "MatchingPairUnderline": "$00414746", ' +
-'            "MatchingPairUnmatched": "clYellow", ' +
-'            "MinimapBackground": "clNone", ' +
-'            "MinimapBookmark": "$005E7175", ' +
-'            "MinimapVisibleLines": "$003E4849", ' +
-'            "RightMargin": "clSilver", ' +
-'            "RightMovingEdge": "clSilver", ' +
-'            "SearchHighlighterBackground": "$003E4849", ' +
-'            "SearchHighlighterForeground": "clNone", ' +
-'            "SearchMapActiveLine": "$00F0F0F0", ' +
-'            "SearchMapBackground": "$00F4F4F4", ' +
-'            "SearchMapForeground": "$0078AAFF", ' +
-'            "SelectionBackground": "clHighlight", ' +
-'            "SelectionForeground": "clHighlightText", ' +
-'            "SyncEditBackground": "$00FFFFFF", ' +
-'            "SyncEditEditBorder": "$00F8F8F2", ' +
-'            "SyncEditWordBorder": "$003E4849", ' +
-'            "WordWrapIndicatorArrow": "$00000000", ' +
-'            "WordWrapIndicatorLines": "$00000000" ' +
-'         } ' +
-'      }, ' +
-'      "Elements": [ ' +
-'         { ' +
-'            "Name": "Editor", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Comment", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "String", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Directive", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Character", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "ReservedWord", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF", ' +
-'            "Style": "Bold" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Symbol", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Number", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "HexNumber", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "HighlightedBlock", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "HighlightedBlockSymbol", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "AssemblerComment", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "AssemblerReservedWord", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF", ' +
-'            "Style": "Bold" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Attribute", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "Method", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF", ' +
-'            "Style": "Italic" ' +
-'         }, ' +
-'         { ' +
-'            "Name": "MethodName", ' +
-'            "Foreground": "$00000000", ' +
-'            "Background": "$00FFFFFF" ' +
-'         } ' +
-'      ] ' +
-'   } ' +
-'} ';
 
-
-GITHUBCSS =
-          '<!DOCTYPE html> ' +
-          '<html> ' +
-          '<head> ' +
-          '<title>THTMLViewer CSS Demo</title> ' +
-          '<style type="text/css"> ' +
-  '/* ' +
-  '  GitHub-Flavored Dark Mode CSS for THTMLViewer ' +
-  '  - Uses only CSS 1 / 2.1 properties known to be well-supported. ' +
-  '  - Focuses on typography, spacing, and color for a modern feel. ' +
-  '*/ ' +
-  ' ' +
-  'body { ' +
-  '    background-color: #0d1117; /* Very dark blue-gray, like GitHub */ ' +
-  '    color: #c9d1d9;             /* Light gray for main text */ ' +
-  '    font-family: sans-serif;    /* Relies on system''s default sans-serif font */ ' +
-  '    font-size: 11pt; ' +
-  '    line-height: 1.6; ' +
-  '    margin: 20px;               /* Give the whole document some breathing room */ ' +
-  '} ' +
-  ' ' +
-  '/* --- Headings --- */ ' +
-  'h1, h2, h3, h4, h5, h6 { ' +
-  '    font-weight: bold; ' +
-  '    color: #ffffff;             /* Brighter white for headings */ ' +
-  '    margin-top: 24px; ' +
-  '    margin-bottom: 16px; ' +
-  '    border-bottom: 1px solid #30363d; /* Subtle separator line */ ' +
-  '    padding-bottom: 6px; ' +
-  '} ' +
-  ' ' +
-  'h1 { font-size: 2em; } ' +
-  'h2 { font-size: 1.5em; } ' +
-  'h3 { font-size: 1.25em; } ' +
-  'h4 { font-size: 1em; } ' +
-  ' ' +
-  '/* Remove the border from smaller headings */ ' +
-  'h3, h4, h5, h6 { ' +
-  '    border-bottom: none; ' +
-  '} ' +
-  ' ' +
-  ' ' +
-  '/* --- Basic Typography --- */ ' +
-  'p { ' +
-  '    margin-top: 0; ' +
-  '    margin-bottom: 16px; /* Vertical spacing for paragraphs */ ' +
-  '} ' +
-  ' ' +
-  'a { ' +
-  '    color: #58a6ff;         /* Bright blue for links */ ' +
-  '    text-decoration: none;  /* Modern look, no underline by default */ ' +
-  '} ' +
-  ' ' +
-  'a:hover { ' +
-  '    text-decoration: underline; /* Underline on hover for discoverability */ ' +
-  '} ' +
-  ' ' +
-  'strong, b { ' +
-  '    font-weight: bold; ' +
-  '} ' +
-  ' ' +
-  'em, i { ' +
-  '    font-style: italic; ' +
-  '} ' +
-  ' ' +
-  'hr { ' +
-  '    height: 1px; ' +
-  '    background-color: #30363d; /* Darker gray for horizontal rules */ ' +
-  '    border: 0; ' +
-  '    margin: 24px 0; ' +
-  '} ' +
-  ' ' +
-  ' ' +
-  '/* --- Code Blocks & Inline Code --- */ ' +
-  '/* Inline code like `this` */ ' +
-  'code { ' +
-  '    font-family: monospace; ' +
-  '    font-size: 0.9em; ' +
-  '    background-color: #404040; ' +
-  '    padding: 2px 5px; ' +
-  '    /* border-radius is not supported, but good practice to include */ ' +
-  '    /* border-radius: 3px; */ ' +
-  '} ' +
-  ' ' +
-  '/* Fenced code blocks */ ' +
-  'pre { ' +
-  '    background-color: #161b22; ' +
-  '    border: 1px solid #30363d; ' +
-  '    padding: 16px; ' +
-  '    white-space: pre; /* Essential for preserving code formatting */ ' +
-  '    font-size: 0.9em; ' +
-  '    /* overflow: auto; is not fully supported, but the viewer adds scrollbars if needed */ ' +
-  '} ' +
-  ' ' +
-  '/* The <code> tag inside a <pre> block should not have its own box style */ ' +
-  'pre code { ' +
-  '    background-color: transparent; ' +
-  '    padding: 0; ' +
-  '    border: none; ' +
-  '} ' +
-  ' ' +
-  ' ' +
-  '/* --- Blockquotes --- */ ' +
-  'blockquote { ' +
-  '    margin-left: 0; ' +
-  '    padding-left: 15px; ' +
-  '    border-left: 4px solid #30363d; ' +
-  '    color: #8b949e; /* Muted text color for quotes */ ' +
-  '} ' +
-  ' ' +
-  ' ' +
-  '/* --- Lists --- */ ' +
-  'ul, ol { ' +
-  '    padding-left: 30px; ' +
-  '    margin-bottom: 16px; ' +
-  '} ' +
-  ' ' +
-  'li { ' +
-  '    margin-bottom: 5px; /* Spacing between list items */ ' +
-  '} ' +
-  ' ' +
-  ' ' +
-  '/* --- Tables --- */ ' +
-  'table { ' +
-  '    border-collapse: collapse; ' +
-  '    width: 100%; ' +
-  '    margin-bottom: 16px; ' +
-  '} ' +
-  ' ' +
-  'th, td { ' +
-  '    border: 1px solid #30363d; ' +
-  '    padding: 6px 13px; ' +
-  '    text-align: left; ' +
-  '} ' +
-  ' ' +
-  'th { ' +
-  '    font-weight: bold; ' +
-  '    background-color: #161b22; ' +
-  '} ' +
-  ' ' +
-  '/* Alternating row colors for readability */ ' +
-  '/* Note: :nth-child is NOT supported, this is for other renderers. ' +
-  '   THTMLViewer will just show all rows with the default td background. */ ' +
-  'tr:nth-child(2n) { ' +
-  '    background-color: #161b22; ' +
-  '} ' +
-  'img {max-width: 100%; height: auto; } ' +
-  'table { width: 100%; border-collapse: collapse;} '+
-  'th, td { width: 100%; }'+
-
-           '</style> ' +
-           '</head> ' +
-           '<body> ' ;
 
 

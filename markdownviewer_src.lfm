@@ -1915,11 +1915,29 @@ object Form1: TForm1
           OnClick = mnuSyntaxClick
         end
         object mnuTheme: TMenuItem
-          Caption = 'Enable Custom Theme'
-          OnClick = mnuThemeClick
+          Caption = '&Theme'
+          object mnuThemeSystem: TMenuItem
+            Caption = '&System'
+            OnClick = mnuThemeSelect
+          end
+          object mnuThemeLight: TMenuItem
+            Tag = 1
+            Caption = '&Light'
+            OnClick = mnuThemeSelect
+          end
+          object mnuThemeDark: TMenuItem
+            Tag = 2
+            Caption = '&Dark'
+            OnClick = mnuThemeSelect
+          end
+          object mnuThemeCustom: TMenuItem
+            Tag = 3
+            Caption = '&Custom (Theme.json + style.css)'
+            OnClick = mnuThemeSelect
+          end
         end
         object mnuCSS: TMenuItem
-          Caption = 'Enable Custom Style'
+          Caption = 'Enable Custom &Style (style.css)'
           OnClick = mnuCSSClick
         end
       end

@@ -113,6 +113,9 @@ uses
   Markdown4D.Editor.PreviewScroll,
   Markdown4D.Ast.Interfaces,
   Markdown4D.Theme,
+  // TSyntaxTokenKind: the palette the canvas colors code with, which the editor
+  // borrows for its own token colors (see SetLexerPalette).
+  Markdown4D.Highlighter.Interfaces,
   Markdown4D.Layout.Interfaces,
   Markdown4D.Layout.Engine,
   Markdown4D.Layout.Renderer,
@@ -155,6 +158,32 @@ type
       AEngine: Integer);
     destructor Destroy; override;
   end;
+
+type
+  Comodin=class(TControl); //for scrolling
+
+// Which palette the editor and every preview backend draw with. System follows
+// the desktop's preference (Light when it cannot be told); Custom reads the
+// theme files next to the exe -- Theme.json for the editor (BCEditor's theme
+// format, the one this app has always shipped), style.css for the HTML preview
+// and, when present, Md4dTheme.json for the canvas one.
+type
+  TAppTheme = (atSYSTEM, atLIGHT, atDARK, atCUSTOM);
+
+// One color the custom Theme.json asks for, before the EControl format names
+// are known (the lexer library is loaded later, in FormCreate). FontColor is
+// clNone when the entry names a color without a foreground -- a background-only
+// editor color, say -- and HasBg tells an absent Background from clNone.
+type
+  TThemeOverride = record
+    Name: string;       // a BCEditor theme key or element name
+    FontColor: TColor;
+    BgColor: TColor;
+    HasBg: Boolean;
+    Style: TFontStyles;
+    HasStyle: Boolean;
+  end;
+  TThemeOverrides = array of TThemeOverride;
 
   { TForm1 }
 
@@ -229,7 +258,12 @@ type
     engMarkdown4DNative: TMenuItem;
     mnuSyntax: TMenuItem;
     mnuTheme: TMenuItem;
-    mnuCSS: TMenuItem;  procedure FormCreate(Sender: TObject);
+    mnuThemeSystem: TMenuItem;
+    mnuThemeLight: TMenuItem;
+    mnuThemeDark: TMenuItem;
+    mnuThemeCustom: TMenuItem;
+    mnuCSS: TMenuItem;
+    procedure FormCreate(Sender: TObject);
     procedure FormMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
     procedure FormKeyPress(Sender: TObject; var Key: Char);
@@ -288,7 +322,7 @@ type
     procedure ToggleEngine(Sender: TObject);
     procedure TogglePreview(Sender: TObject);
     procedure mnuSyntaxClick(Sender: TObject);
-    procedure mnuThemeClick(Sender: TObject);
+    procedure mnuThemeSelect(Sender: TObject);
     procedure mnuCSSClick(Sender: TObject);
     procedure Loadremoteimages1Click(Sender: TObject);
     procedure BCEditor1CaretChanged(Sender: TObject);
@@ -298,6 +332,14 @@ type
     TrackBar1_Position:integer;
     SelectedEngine: Integer;
     SelectedPreview: Integer; // pvHTML / pvMARKDOWN4D / pvIE
+// Which palette the editor and the previews are painted with (see
+    // ApplyTheme). Saved as "theme" the moment it is picked, like the engine
+    // and the preview backend.
+    SelectedTheme: TAppTheme;
+    // The canvas theme built from Md4dTheme.json when the custom theme is on.
+    // The viewer borrows the theme it is given (it only frees the presets it
+    // creates itself), so this is what frees it.
+    FCanvasTheme: TMarkdownTheme;
 
     FCurrentRequestID: Int64; // A unique, increment ID for each conversion request
     FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
@@ -371,6 +413,28 @@ type
     // makes its images change accordingly.
     procedure ApplyRemoteImagesSetting(Reload: Boolean);
     procedure ApplyViewMode;
+
+    // Theming. ApplyTheme paints every surface with the picked palette: the
+    // editor (its own colors and the EControl token colors), the table of
+    // contents and the window chrome, and whichever preview backend is on
+    // duty. The pick is written to settings.ini at the moment it is made, so a
+    // killed process still starts with the theme the user last chose.
+    procedure ApplyTheme(AReloadPreview: Boolean);
+    procedure UpdateThemeInMenu;
+    // Turns the EControl lexer (and with it the token colors, folding and the
+    // code tree) on or off in the editor, following mnuSyntax.Checked.
+    procedure ApplySyntaxEnabled;
+    function LexerForCurrentFile: TecSyntAnalyzer;
+    // Builds the HTML preview's style sheet (the theme's base sheet plus the
+    // user's style.css when "Enable Custom Style" is on) and the document head
+    // it is baked into. Also feeds PreviewCSS, which the JS engines use.
+    procedure RefreshPreviewStyle(ADark: Boolean);
+    procedure ApplyCanvasTheme(ADark: Boolean);
+    procedure ApplyChromeColors(ADark: Boolean);
+    // Reads Theme.json (BCEditor's theme format, the one this app has always
+    // shipped) into name -> color entries; ADark is what its editor background
+    // asks the rest of the app to be.
+    procedure LoadCustomTheme(out ADark: Boolean; out AOverrides: TThemeOverrides);
     // Leaves the panes in the order tree | tree splitter | editor | editor
     // splitter | viewer by writing their Lefts, which is what the align pass
     // sorts the alLeft controls by. The view-mode handlers own the widths,
@@ -407,8 +471,8 @@ type
   public
     { Public declarations }
   end;
-type
-  Comodin=class(TControl); //for scrolling
+
+    
 const
   mdPAGEDOWN = 1;
   mdMARKDOWNJS = 2;
@@ -442,7 +506,13 @@ var
   {$ENDIF}
   PrevWindowState: TWindowState;
   CurrentFile: string;
+  // The style sheet head the JS engines are loaded with (see
+  // RefreshPreviewStyle). It ends in </head> because HEADER opens the tag.
   PreviewCSS: string;
+  // The whole document head the native HTML preview is rendered into: the
+  // theme's sheet, the custom one when enabled, </head><body>. SyncUpdateUI
+  // (in the worker) puts the engine's HTML after it.
+  PreviewHtmlHead: string;
   textBuffer: widestring;
   //para mantener el aspecto al redimensionar
   ViewersRatio: integer;
@@ -469,8 +539,527 @@ var
 {$include pagedown.inc}
 
 implementation
-uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} inifiles, LCLIntf, Printers, PrintersDlgs, Types, Math;
+uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} inifiles, LCLIntf, Printers, PrintersDlgs, Types, Math,
+  // TATEditorColors, the editor's palette record (see SetEditorPalette).
+  ATSynEdit_Colors,
+  // TecSyntaxFormat: the per-token colors of a lexer (see SetLexerFormat).
+  ec_Syntax_Format,
+  // Theme.json / Md4dTheme.json are JSON; the desktop's light/dark preference
+  // is read from a helper process on Unix.
+  System.JSON, Process;
 {$R *.lfm}
+
+// ---------------------------------------------------------------------------
+// Theming helpers
+//
+// Colors travel as strings in the custom theme file (BCEditor's $00RRGGBB
+// format, or Delphi's cl* names) and as $AARRGGBB in Markdown4D's palette,
+// while LCL's TColor is $00BBGGRR: everything is converted here, at the edge,
+// so the rest of the theming code only deals with TColor.
+// ---------------------------------------------------------------------------
+
+function ThemeColorFromString(const S: string): TColor;
+var
+  Txt: string;
+  Value: Int64;
+  ColorValue: LongInt;
+begin
+  Result := clNone;
+  Txt := Trim(S);
+  if Txt = '' then
+    Exit;
+  if Txt[1] = '$' then
+  begin
+    Value := StrToInt64Def('$' + Copy(Txt, 2, MaxInt), -1);
+    if Value < 0 then
+      Exit;
+    Result := RGB((Value shr 16) and $FF, (Value shr 8) and $FF, Value and $FF);
+  end
+  else if IdentToColor(Txt, ColorValue) then
+    Result := TColor(ColorValue);
+end;
+
+function ArgbToLclColor(C: TLayoutColor): TColor;
+begin
+  Result := RGB((C shr 16) and $FF, (C shr 8) and $FF, C and $FF);
+end;
+
+// Perceived brightness, 0..255: what decides whether the custom theme's own
+// background asks the rest of the app to be light or dark.
+function ColorLuminance(C: TColor): Integer;
+var
+  R, G, B: Integer;
+begin
+  C := ColorToRGB(C);
+  R := C and $FF;
+  G := (C shr 8) and $FF;
+  B := (C shr 16) and $FF;
+  Result := (R * 299 + G * 587 + B * 114) div 1000;
+end;
+
+function ThemeToName(ATheme: TAppTheme): string;
+begin
+  case ATheme of
+    atLIGHT: Result := 'light';
+    atDARK: Result := 'dark';
+    atCUSTOM: Result := 'custom';
+  else
+    Result := 'system';
+  end;
+end;
+
+function ThemePresetOf(ADark: Boolean): TMarkdownThemePreset;
+begin
+  if ADark then
+    Result := TMarkdownThemePreset.Dark
+  else
+    Result := TMarkdownThemePreset.Light;
+end;
+
+function IsMarkdownLexer(An: TecSyntAnalyzer): Boolean;
+begin
+  Result := Assigned(An) and (An.LexerName = 'Markdown');
+end;
+
+// Runs a short helper program and returns its standard output. False when it is
+// not installed or fails. Used to ask the desktop about its light/dark
+// preference; the output is tiny, so the pipe cannot fill up behind
+// poWaitOnExit.
+function RunHelper(const ACommand: string; const AArgs: array of string;
+  out AOutput: string): Boolean;
+var
+  P: TProcess;
+  I: Integer;
+  Buffer: array[0..1023] of Char;
+  Count: LongInt;
+begin
+  AOutput := '';
+  Result := False;
+  P := TProcess.Create(nil);
+  try
+    try
+      P.Executable := ACommand;
+      P.Parameters.Clear;
+      for I := 0 to High(AArgs) do
+        P.Parameters.Add(AArgs[I]);
+      P.Options := [poUsePipes, poWaitOnExit, poStderrToOutPut];
+      P.Execute;
+      repeat
+        Count := P.Output.Read(Buffer, SizeOf(Buffer));
+        if Count > 0 then
+          AOutput := AOutput + Copy(Buffer, 1, Count);
+      until Count <= 0;
+      Result := True;
+    except
+      // a missing helper must not take the app down
+      Result := False;
+    end;
+  finally
+    P.Free;
+  end;
+end;
+
+// Whether the desktop asks for a dark UI. Windows has a registry key, macOS the
+// AppleInterfaceStyle default, and the Linux desktops expose it through
+// gsettings (GNOME, and everything that follows its settings) or GTK_THEME. No
+// answer means Light: a wrong guess is worse than the conservative one.
+function SystemPrefersDark: Boolean;
+var
+  Output: string;
+  {$IFDEF MSWINDOWS}
+  Reg: TRegistry;
+  {$ENDIF}
+begin
+  {$IFDEF MSWINDOWS}
+  Result := False;
+  Reg := TRegistry.Create;
+  try
+    Reg.RootKey := HKEY_CURRENT_USER;
+    if Reg.OpenKeyReadOnly('\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') then
+      Result := Reg.ReadInteger('AppsUseLightTheme') = 0;
+  finally
+    Reg.Free;
+  end;
+  {$ELSE}
+  Result := False;
+  {$IFDEF DARWIN}
+  if RunHelper('defaults', ['read', '-g', 'AppleInterfaceStyle'], Output) then
+    if Pos('dark', LowerCase(Output)) > 0 then
+      Exit(True);
+  {$ENDIF}
+  // GTK_THEME=Adwaita:dark is what a dark desktop exports to its children.
+  if Pos('dark', LowerCase(GetEnvironmentVariable('GTK_THEME'))) > 0 then
+    Exit(True);
+  if RunHelper('gsettings', ['get', 'org.gnome.desktop.interface', 'color-scheme'], Output) then
+    if Pos('dark', LowerCase(Output)) > 0 then
+      Exit(True);
+  if RunHelper('gsettings', ['get', 'org.gnome.desktop.interface', 'gtk-theme'], Output) then
+    if Pos('dark', LowerCase(Output)) > 0 then
+      Exit(True);
+  {$ENDIF}
+end;
+
+// JSON navigation for the custom theme file. vcl-compat's System.JSON is the
+// implementation Markdown4D already links, so there is no second JSON library
+// in the binary.
+function JsonChildObject(const AObj: TJSONObject; const AName: string): TJSONObject;
+var
+  V: TJSONValue;
+begin
+  Result := nil;
+  if not Assigned(AObj) then
+    Exit;
+  V := AObj.GetValue(AName);
+  if V is TJSONObject then
+    Result := TJSONObject(V);
+end;
+
+function JsonChildArray(const AObj: TJSONObject; const AName: string): TJSONArray;
+var
+  V: TJSONValue;
+begin
+  Result := nil;
+  if not Assigned(AObj) then
+    Exit;
+  V := AObj.GetValue(AName);
+  if V is TJSONArray then
+    Result := TJSONArray(V);
+end;
+
+function JsonText(const AObj: TJSONObject; const AName: string): string;
+var
+  V: TJSONValue;
+begin
+  Result := '';
+  if not Assigned(AObj) then
+    Exit;
+  V := AObj.GetValue(AName);
+  if V is TJSONString then
+    Result := UTF8Encode(TJSONString(V).Value);
+end;
+
+// The editor's own colors: GitHub's light/dark palette, the one the previews
+// are drawn with, so the editor and the rendered page read as one surface.
+procedure SetEditorPalette(var C: TATEditorColors; ADark: Boolean);
+begin
+  C.Init;
+  if ADark then
+  begin
+    C.TextFont := RGB($E6, $ED, $F3);
+    C.TextBG := RGB($0D, $11, $17);
+    C.TextSelFont := RGB($E6, $ED, $F3);
+    C.TextSelBG := RGB($26, $4F, $78);
+    C.TextDisabledFont := RGB($6E, $76, $81);
+    C.TextDisabledBG := RGB($16, $1B, $22);
+    C.Caret := RGB($E6, $ED, $F3);
+    C.GutterFont := RGB($6E, $76, $81);
+    C.GutterBG := RGB($0D, $11, $17);
+    C.GutterCaretFont := RGB($E6, $ED, $F3);
+    C.GutterCaretBG := RGB($16, $1B, $22);
+    C.GutterFoldLine := RGB($3D, $44, $4D);
+    C.GutterFoldLine2 := RGB($58, $A6, $FF);
+    C.GutterFoldBG := RGB($16, $1B, $22);
+    C.GutterSeparatorBG := RGB($30, $36, $3D);
+    C.CurrentLineBG := RGB($16, $1B, $22);
+    C.CurrentLineBG2 := clNone;
+    C.BookmarkBG := RGB($3A, $32, $0F);
+    C.BookmarkIcon := RGB($D2, $A8, $FF);
+    C.RulerBG := RGB($0D, $11, $17);
+    C.RulerFont := RGB($6E, $76, $81);
+    C.MarginRight := RGB($30, $36, $3D);
+    C.MarginCaret := RGB($FF, $D3, $3D);
+    C.MarginUser := RGB($7E, $E7, $87);
+    C.IndentVertLines := RGB($2A, $30, $38);
+    C.UnprintedFont := RGB($6E, $76, $81);
+    C.UnprintedBG := RGB($16, $1B, $22);
+    C.UnprintedHexFont := RGB($58, $A6, $FF);
+    C.MarkedLinesBG := RGB($2A, $2A, $1A);
+    C.Links := RGB($58, $A6, $FF);
+    C.LockedBG := RGB($16, $1B, $22);
+    C.BorderLine := RGB($3D, $44, $4D);
+    C.BorderLineFocused := RGB($58, $A6, $FF);
+    C.BorderParentBG := RGB($0D, $11, $17);
+    C.BlockStaple := RGB($3D, $44, $4D);
+    C.BlockSepLine := RGB($3D, $44, $4D);
+    C.TextHintFont := RGB($6E, $76, $81);
+    C.StateChanged := RGB($D2, $A8, $FF);
+    C.StateAdded := RGB($7E, $E7, $87);
+    C.StateSaved := RGB($6E, $76, $81);
+    C.ComboboxArrow := RGB($C9, $D1, $D9);
+    C.ComboboxArrowBG := RGB($16, $1B, $22);
+  end
+  else
+  begin
+    C.TextFont := RGB($1F, $23, $28);
+    C.TextBG := RGB($FF, $FF, $FF);
+    C.TextSelFont := RGB($1F, $23, $28);
+    C.TextSelBG := RGB($B6, $D7, $FF);
+    C.TextDisabledFont := RGB($8C, $95, $9F);
+    C.TextDisabledBG := RGB($F6, $F8, $FA);
+    C.Caret := RGB($1F, $23, $28);
+    C.GutterFont := RGB($8C, $95, $9F);
+    C.GutterBG := RGB($F6, $F8, $FA);
+    C.GutterCaretFont := RGB($1F, $23, $28);
+    C.GutterCaretBG := RGB($E6, $EA, $EF);
+    C.GutterFoldLine := RGB($D0, $D7, $DE);
+    C.GutterFoldLine2 := RGB($09, $69, $DA);
+    C.GutterFoldBG := RGB($E6, $EA, $EF);
+    C.GutterSeparatorBG := RGB($D0, $D7, $DE);
+    C.CurrentLineBG := RGB($F6, $F8, $FA);
+    C.CurrentLineBG2 := clNone;
+    C.BookmarkBG := RGB($FF, $F8, $C5);
+    C.BookmarkIcon := RGB($9A, $67, $00);
+    C.RulerBG := RGB($F6, $F8, $FA);
+    C.RulerFont := RGB($8C, $95, $9F);
+    C.MarginRight := RGB($D0, $D7, $DE);
+    C.MarginCaret := RGB($2D, $A4, $2D);
+    C.MarginUser := RGB($BF, $87, $00);
+    C.IndentVertLines := RGB($D8, $DE, $E4);
+    C.UnprintedFont := RGB($A0, $A8, $B0);
+    C.UnprintedBG := RGB($F0, $F2, $F5);
+    C.UnprintedHexFont := RGB($6E, $76, $81);
+    C.MarkedLinesBG := RGB($FF, $F8, $C5);
+    C.Links := RGB($09, $69, $DA);
+    C.LockedBG := RGB($F6, $F8, $FA);
+    C.BorderLine := RGB($D0, $D7, $DE);
+    C.BorderLineFocused := RGB($09, $69, $DA);
+    C.BorderParentBG := RGB($FF, $FF, $FF);
+    C.BlockStaple := RGB($D0, $D7, $DE);
+    C.BlockSepLine := RGB($D0, $D7, $DE);
+    C.TextHintFont := RGB($8C, $95, $9F);
+    C.StateChanged := RGB($82, $50, $DF);
+    C.StateAdded := RGB($1A, $7F, $37);
+    C.StateSaved := RGB($8C, $95, $9F);
+    C.ComboboxArrow := RGB($1F, $23, $28);
+    C.ComboboxArrowBG := RGB($F6, $F8, $FA);
+  end;
+end;
+
+// Sets one EControl format by name in every analyzer that has it. The lexers
+// are one library (lib.lxl) and their formats are what the adapter paints with,
+// so this is the editor's syntax theme.
+procedure SetLexerFormat(AManager: TecSyntaxManager; const AName: string;
+  AFontColor, ABgColor: TColor; ASetBg: Boolean;
+  const AStyle: TFontStyles; ASetStyle: Boolean);
+var
+  I, J: Integer;
+  An: TecSyntAnalyzer;
+  Fmt: TecSyntaxFormat;
+begin
+  if not Assigned(AManager) then
+    Exit;
+  for I := 0 to AManager.AnalyzerCount - 1 do
+  begin
+    An := AManager.Analyzers[I];
+    for J := 0 to An.Formats.Count - 1 do
+    begin
+      Fmt := An.Formats[J];
+      if not SameText(Fmt.DisplayName, AName) then
+        Continue;
+      if AFontColor <> clNone then
+        Fmt.Font.Color := AFontColor;
+      if ASetBg then
+        Fmt.BgColor := ABgColor;
+      if ASetStyle then
+        Fmt.Font.Style := AStyle;
+    end;
+  end;
+end;
+
+// Paints the editor's syntax with the palette the Markdown4D canvas colors the
+// same tokens with, so a fenced code block looks the same on both sides. The
+// first group is the Markdown lexer's own set (lib.lxl's SyntAnal67), the
+// second the names the lexers it embeds use for the code inside fences.
+procedure SetLexerPalette(AManager: TecSyntaxManager; ADark: Boolean);
+var
+  Theme: TMarkdownTheme;
+  Plain, Keyword, StrLit, NumLit, Comment, Directive, Entity, Tag,
+    AttrName, Link, CodeBg, QuoteFg: TColor;
+  I, J: Integer;
+  Fmt: TecSyntaxFormat;
+begin
+  if not Assigned(AManager) then
+    Exit;
+
+  Theme := TMarkdownTheme.CreatePreset(ThemePresetOf(ADark));
+  try
+    Plain := ArgbToLclColor(Theme.TextColor);
+    Keyword := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.Keyword]);
+    StrLit := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.StringLiteral]);
+    NumLit := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.NumberLiteral]);
+    Comment := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.Comment]);
+    Directive := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.Directive]);
+    Entity := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.Entity]);
+    Tag := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.TagName]);
+    AttrName := ArgbToLclColor(Theme.TokenColors[TSyntaxTokenKind.AttributeName]);
+    Link := ArgbToLclColor(Theme.LinkColor);
+    CodeBg := ArgbToLclColor(Theme.CodeBackgroundColor);
+    QuoteFg := ArgbToLclColor(Theme.BlockQuoteTextColor);
+  finally
+    Theme.Free;
+  end;
+
+  // The Markdown lexer. Every background is written (clNone where the token has
+  // none) so the light pastel blocks lib.lxl ships do not survive into dark.
+  SetLexerFormat(AManager, 'Heading', Keyword, clNone, True, [fsBold], True);
+  SetLexerFormat(AManager, 'Comment', Comment, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Quote', QuoteFg, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Text', Plain, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Codeblock', Plain, CodeBg, True, [], True);
+  SetLexerFormat(AManager, 'Block', Plain, CodeBg, True, [], True);
+  SetLexerFormat(AManager, 'Link', Link, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Image', Link, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Reference', Entity, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Footnote', Entity, clNone, True, [], True);
+  SetLexerFormat(AManager, 'HTML Code', Tag, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Bold', Plain, clNone, True, [fsBold], True);
+  SetLexerFormat(AManager, 'Italic', Plain, clNone, True, [fsItalic], True);
+  SetLexerFormat(AManager, 'Bold-Italic', Plain, clNone, True, [fsBold, fsItalic], True);
+  SetLexerFormat(AManager, 'Definition', Plain, clNone, True, [fsBold], True);
+  SetLexerFormat(AManager, 'List', Plain, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Crossed out', Plain, clNone, True, [fsStrikeOut], True);
+
+  // Everything else: the formats of the lexers Markdown hands fenced blocks to,
+  // and the plain names the other analyzers share.
+  SetLexerFormat(AManager, 'Default', Plain, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Identifier', Plain, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Id', Plain, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Symbol', Plain, clNone, True, [], True);
+  SetLexerFormat(AManager, 'String', StrLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Char', StrLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Number', NumLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Integer', NumLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Float', NumLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Hex', NumLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'HexNumber', NumLit, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Reserved word', Keyword, clNone, True, [fsBold], True);
+  SetLexerFormat(AManager, 'Id keyword', Keyword, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Id keyword def', Keyword, clNone, True, [fsBold], True);
+  SetLexerFormat(AManager, 'Preprocessor', Directive, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Attribute', AttrName, clNone, True, [], True);
+  SetLexerFormat(AManager, 'Method', Keyword, clNone, True, [], True);
+  SetLexerFormat(AManager, 'MethodName', Keyword, clNone, True, [], True);
+
+  // Most lexers number their comment styles: "Comment", "Comment 1", ...
+  for I := 0 to AManager.AnalyzerCount - 1 do
+  begin
+    for J := 0 to AManager.Analyzers[I].Formats.Count - 1 do
+    begin
+      Fmt := AManager.Analyzers[I].Formats[J];
+      if Pos('Comment', Fmt.DisplayName) = 1 then
+        Fmt.Font.Color := Comment;
+    end;
+  end;
+end;
+
+// The custom Theme.json's editor colors, on top of the palette above: the keys
+// BCEditor writes under Colors/Editor/Colors, plus its "Editor" element (the
+// plain text and its background).
+procedure ApplyEditorOverrides(var C: TATEditorColors; const AOverrides: TThemeOverrides);
+var
+  I: Integer;
+begin
+  for I := 0 to High(AOverrides) do
+    with AOverrides[I] do
+    begin
+      if SameText(Name, 'Editor') then
+      begin
+        if FontColor <> clNone then
+          C.TextFont := FontColor;
+        if HasBg and (BgColor <> clNone) then
+          C.TextBG := BgColor;
+      end
+      else if SameText(Name, 'Background') then
+        C.TextBG := FontColor
+      else if SameText(Name, 'ActiveLineBackground') then
+        C.CurrentLineBG := FontColor
+      else if SameText(Name, 'SelectionBackground') then
+        C.TextSelBG := FontColor
+      else if SameText(Name, 'SelectionForeground') then
+        C.TextSelFont := FontColor
+      else if SameText(Name, 'LeftMarginBackground') then
+        C.GutterBG := FontColor
+      else if SameText(Name, 'LeftMarginLineNumbers') then
+        C.GutterFont := FontColor
+      else if SameText(Name, 'LeftMarginActiveLineBackground') then
+        C.GutterCaretBG := FontColor
+      else if SameText(Name, 'LeftMarginLineNumberLine') then
+        C.GutterCaretFont := FontColor
+      else if SameText(Name, 'LeftMarginBookmarkPanel') then
+        C.BookmarkBG := FontColor
+      else if SameText(Name, 'LeftMarginLineStateModified') then
+        C.StateChanged := FontColor
+      else if SameText(Name, 'LeftMarginLineStateNormal') then
+        C.StateAdded := FontColor
+      else if SameText(Name, 'RightMargin') then
+        C.MarginRight := FontColor;
+    end;
+end;
+
+// Which EControl formats a BCEditor theme element stands for, '|'-separated.
+// The Markdown lexer names its own styles; the generic names are the ones the
+// lexers it embeds use for fenced code.
+function EcontrolNamesForTheme(const AThemeName: string): string;
+begin
+  if SameText(AThemeName, 'Comment') then
+    Result := 'Comment'
+  else if SameText(AThemeName, 'String') then
+    Result := 'String|Char'
+  else if SameText(AThemeName, 'Directive') then
+    Result := 'Preprocessor'
+  else if SameText(AThemeName, 'Character') then
+    Result := 'Char'
+  else if SameText(AThemeName, 'ReservedWord') then
+    Result := 'Reserved word|Id keyword|Id keyword def|Heading'
+  else if SameText(AThemeName, 'Symbol') then
+    Result := 'Symbol'
+  else if SameText(AThemeName, 'Number') then
+    Result := 'Number|Integer|Float'
+  else if SameText(AThemeName, 'HexNumber') then
+    Result := 'Hex|HexNumber'
+  else if SameText(AThemeName, 'HighlightedBlock') then
+    Result := 'Block|Codeblock'
+  else if SameText(AThemeName, 'Attribute') then
+    Result := 'Attribute'
+  else if SameText(AThemeName, 'Method') then
+    Result := 'Method'
+  else if SameText(AThemeName, 'MethodName') then
+    Result := 'MethodName'
+  else
+    Result := '';
+end;
+
+procedure ApplyLexerOverrides(AManager: TecSyntaxManager;
+  const AOverrides: TThemeOverrides);
+var
+  I, P: Integer;
+  Names, One: string;
+begin
+  for I := 0 to High(AOverrides) do
+    with AOverrides[I] do
+    begin
+      Names := EcontrolNamesForTheme(Name);
+      while Names <> '' do
+      begin
+        P := Pos('|', Names);
+        if P > 0 then
+        begin
+          One := Copy(Names, 1, P - 1);
+          Delete(Names, 1, P);
+        end
+        else
+        begin
+          One := Names;
+          Names := '';
+        end;
+        // A token background only means something for highlighted blocks; the
+        // other elements carry the editor's surface, which the palette and
+        // ApplyEditorOverrides already paint.
+        SetLexerFormat(AManager, One, FontColor, BgColor,
+          HasBg and SameText(Name, 'HighlightedBlock'), Style, HasStyle);
+      end;
+    end;
+end;
 
 {$IFDEF MSWINDOWS}
 procedure WBLoadHTML(WebBrowser: TWebBrowser; HTMLCode: string) ;
@@ -602,7 +1191,9 @@ begin
    if FRequestID = Form1.FCurrentRequestID then
    begin
      LastPreviewBody := FHtmlResult;
-     PreviewHtml.Text := GITHUBCSS + FHtmlResult + '</body></html>';
+     // PreviewHtmlHead is the theme's sheet, built on the main thread by
+     // RefreshPreviewStyle; the engine only supplies the body.
+     PreviewHtml.Text := PreviewHtmlHead + FHtmlResult + '</body></html>';
      // The headings of the HTML just rendered are the anchor points the scroll
      // sync needs and the entries of the table of contents; the form owns them
      // from here on.
@@ -980,7 +1571,7 @@ begin
         CurrentFile:=FileName;
         Caption:='MDPad - '+FileName;
         if Assigned(Adapter) then
-          Adapter.Lexer := Lexer_FindForFilename(Manager, CurrentFile);
+          Adapter.Lexer := LexerForCurrentFile;
         textBuffer:=BCEditor1.Text;
         if Tryingtoclose then
         close;
@@ -1073,7 +1664,7 @@ begin
         HTMLText:=TMemo.Create(Self);
         try
           HTMLText.Text:='<!DOCTYPE html><html><head><title>MDPad Exported'
-          +#13' File</title><meta http-equiv="X-UA-Compatible" content="IE=9" ><meta charset="utf-8">'+CSS+'</head><body><div id="readme"><div class="md">'
+          +#13' File</title><meta http-equiv="X-UA-Compatible" content="IE=9" ><meta charset="utf-8">'+PreviewCSS+'<body><div id="readme"><div class="md">'
           +RelHtml+'</div></div><code>Created by <a href="http://apps.codigo'
           +'bit.info/2012/06/markdown-pad-markdown-textfile-editor.html" target="_blank">MDPad v1.1</a> Thanks to <a href="https://code.google.com/p/pagedown/" target="_blank">Pagedown</a></code></body></html>';
 
@@ -1325,32 +1916,13 @@ begin
 
   LoadINI;
 
-  if mnuCSS.Checked then
-  begin
-    if FileExists(ExtractFilePath(ParamStr(0))+'Style.css') then
-      PreviewCSS := '<style type="text/css">'+ LoadFileToStr(ExtractFilePath(ParamStr(0))+'Style.css') +'</style></head>';
-  end
-  else
-      PreviewCSS := CSS;
-
-  //highlight color and editor color
-  if not mnuTheme.Checked then
-  begin
-    {{st := TStringStream.Create(DEFAULTTHEME);
-    try
-      BCEditor1.Highlighter.Colors.LoadFromStream(st);
-    finally
-      FreeAndNil(st);
-    end;}
-  end
-  else
-  begin
-    {{if FileExists(ExtractFilePath(ParamStr(0))+'Theme.json') then
-      BCEditor1.Highlighter.Colors.LoadFromFile(ExtractFilePath(ParamStr(0))+ 'Theme.json');}
-  end;
-  {{if mnuSyntax.Checked then
-    if FileExists(ExtractFilePath(ParamStr(0))+'Markdown.json') then
-      BCEditor1.Highlighter.LoadFromFile(ExtractFilePath(ParamStr(0))+'MarkDown.json');}
+  // Paint the editor and every preview with the picked theme before anything
+  // is loaded, so the first document is already rendered into the right sheet
+  // (the preview is not reloaded here: it is still empty).
+  ApplyTheme(False);
+  // The saved syntax switch decides whether the lexer is attached at all: with
+  // it off the editor stays plain text and no parse happens on keypress.
+  ApplySyntaxEnabled;
 
   textBuffer := BCEditor1.Text;
   // let's load the configured engine
@@ -1404,6 +1976,9 @@ begin
   {$ENDIF}
   PreviewHtml.Free;
   PreviewMd4D.Free;
+  // The viewer only frees the themes it created itself (the presets); the one
+  // built from Md4dTheme.json is MDPad's.
+  FreeAndNil(FCanvasTheme);
 end;
 
 //thanks to http://beensoft.blogspot.com/2007/10/fooling-around-with-twebbrowser-4.html
@@ -1588,7 +2163,12 @@ begin
     CurrentFile:=fn;
     Caption := 'MDPad - '+fn;
     if Assigned(Adapter) then
-      Adapter.Lexer := Lexer_FindForFilename(Manager, CurrentFile);
+    begin
+      Adapter.Lexer := LexerForCurrentFile;
+      // Loading a file raises no change event for the adapter to follow, so it
+      // has to be told which buffer it is now looking at.
+      BCEditor1.DoEventChange(0, False);
+    end;
     UpdateResult; //update the rendering
   end;
 
@@ -1733,7 +2313,7 @@ begin
       ini.WriteInteger('MDPad', 'preview', SelectedPreview);
 
       ini.WriteBool('MDPad', 'syntaxenabled', mnuSyntax.Checked);
-      ini.WriteBool('MDPad', 'themeenabled', mnuTheme.Checked);
+      ini.WriteString('MDPad', 'theme', ThemeToName(SelectedTheme));
       ini.WriteBool('MDPad', 'cssenabled', mnuCSS.Checked);
       ini.WriteBool('MDPad', 'remoteimages', Loadremoteimages1.Checked);
     finally
@@ -1961,7 +2541,11 @@ end;
 // the table of contents UpdateTOC builds from the rendered headings instead.
 procedure TForm1.AdapterParseDone(Sender: TObject; ATime: integer);
 begin
-  if (Adapter.Lexer <> nil) and (Adapter.Lexer.LexerName = 'Markdown') then
+  if Adapter.Lexer = nil then
+    // Highlighting is off (Preferences > "Enable Syntax highlighter"): there is
+    // no parse to fill anything from, and TreeFill needs a client.
+    Exit;
+  if IsMarkdownLexer(Adapter.Lexer) then
     UpdateTOC
   else
   begin
@@ -2115,6 +2699,7 @@ end;
 procedure TForm1.LoadINI;
 var
 ini:tinifile;
+theme: string;
 begin
   ini:=TIniFile.Create(ExtractFilePath(ParamStr(0))+'settings.ini');
     try
@@ -2151,8 +2736,24 @@ begin
       {$IFDEF MSWINDOWS} and (SelectedPreview <> pvIE) {$ENDIF} then
         SelectedPreview := pvHTML;
 
-      mnuSyntax.Checked := ini.ReadBool('MDPad', 'syntaxenabled', false);
-      mnuTheme.Checked := ini.ReadBool('MDPad', 'themeenabled', false);
+      // Syntax highlighting is what a markdown editor is for, so it defaults to
+      // on; the key is honoured either way (see ApplySyntaxEnabled).
+      mnuSyntax.Checked := ini.ReadBool('MDPad', 'syntaxenabled', true);
+      // The theme is a name now (see TAppTheme). A settings.ini written by an
+      // older build only has the "Enable Custom Theme" boolean: true meant the
+      // editor was painted from Theme.json, which is what Custom means now, and
+      // false meant the built-in look, i.e. System.
+      theme := ini.ReadString('MDPad', 'theme', '');
+      if SameText(theme, 'light') then
+        SelectedTheme := atLIGHT
+      else if SameText(theme, 'dark') then
+        SelectedTheme := atDARK
+      else if SameText(theme, 'custom') then
+        SelectedTheme := atCUSTOM
+      else if (theme = '') and ini.ReadBool('MDPad', 'themeenabled', false) then
+        SelectedTheme := atCUSTOM
+      else
+        SelectedTheme := atSYSTEM;
       mnuCSS.Checked := ini.ReadBool('MDPad', 'cssenabled', false);
 
       Loadremoteimages1.Checked := ini.ReadBool('MDPad', 'remoteimages', true);
@@ -2160,6 +2761,7 @@ begin
 
       UpdateEngineInMenu;
       UpdatePreviewInMenu;
+      UpdateThemeInMenu;
 
     finally
       ini.Free;
@@ -2167,78 +2769,383 @@ begin
 
 end;
 
-procedure TForm1.mnuCSSClick(Sender: TObject);
-var
-  chk: boolean;
+procedure TForm1.UpdateThemeInMenu;
 begin
-  chk := not TMenuItem(Sender).Checked;
-  TMenuItem(Sender).Checked := chk;
-  if chk then
+  // The four entries are a radio group: the marks are set only here, so the
+  // AutoCheck toggle a click does first is always corrected.
+  mnuThemeSystem.Checked := SelectedTheme = atSYSTEM;
+  mnuThemeLight.Checked := SelectedTheme = atLIGHT;
+  mnuThemeDark.Checked := SelectedTheme = atDARK;
+  mnuThemeCustom.Checked := SelectedTheme = atCUSTOM;
+end;
+
+// The lexer the editor should be highlighting with: none when the user turned
+// syntax highlighting off, otherwise the one that matches the file.
+function TForm1.LexerForCurrentFile: TecSyntAnalyzer;
+begin
+  Result := nil;
+  if not Assigned(Manager) then
+    Exit;
+  if not mnuSyntax.Checked then
+    Exit;
+  Result := Lexer_FindForFilename(Manager, CurrentFile);
+  // An untitled buffer has no extension to go by, and MDPad edits markdown:
+  // highlight it as such instead of leaving the editor plain.
+  if (Result = nil) and (CurrentFile = '') then
+    Result := Manager.FindAnalyzer('Markdown');
+end;
+
+// Attaches or detaches the EControl lexer, which is what the syntax switch
+// really does: with Adapter.Lexer = nil there are no token colors, no folding
+// and no parse on keypress (the adapter is what re-parsed the buffer as you
+// typed).
+procedure TForm1.ApplySyntaxEnabled;
+var
+  HadCodeTree: Boolean;
+begin
+  if not Assigned(Adapter) then
+    Exit;
+  // EControl's own tree is only there for the non-markdown lexers (MDPad fills
+  // the tree for markdown itself, from the render's headings). Detaching the
+  // lexer frees the ranges those nodes point at, so the tree is rebuilt.
+  HadCodeTree := Assigned(Adapter.Lexer) and not IsMarkdownLexer(Adapter.Lexer);
+  Adapter.Lexer := LexerForCurrentFile;
+  // The adapter only learns about the text through editor change events, and
+  // neither loading a file nor attaching the lexer after the fact raises any:
+  // without this the editor stays plain until the first keystroke. (The
+  // reference demo does the same after it switches a lexer.)
+  BCEditor1.DoEventChange(0, False);
+  if HadCodeTree then
   begin
-    if FileExists(ExtractFilePath(ParamStr(0))+'Style.css') then
-      PreviewCSS := '<style type="text/css">'+ LoadFileToStr(ExtractFilePath(ParamStr(0))+'Style.css') +'</style></head>';
+    ClearTOC;
+    UpdateTOC;
+  end;
+end;
+
+procedure TForm1.ApplyChromeColors(ADark: Boolean);
+var
+  Bg, Fg, Border: TColor;
+begin
+  if ADark then
+  begin
+    Bg := RGB($0D, $11, $17);
+    Fg := RGB($C9, $D1, $D9);
+    Border := RGB($30, $36, $3D);
   end
   else
-    PreviewCSS := CSS;
-  // update the viewer CSS
-  LoadEngine;
+  begin
+    Bg := RGB($FF, $FF, $FF);
+    Fg := RGB($1F, $23, $28);
+    Border := RGB($D0, $D7, $DE);
+  end;
+
+  // The editor and the previews carry the content; the tree, the splitters and
+  // the status bar are the chrome around them, and they follow the same theme
+  // so the window does not end up half dark. Menus belong to the widgetset and
+  // keep its own look.
+  Color := Bg;
+  if Assigned(Tree) then
+  begin
+    Tree.Color := Bg;
+    Tree.Font.Color := Fg;
+    Tree.Invalidate;
+  end;
+  if Assigned(Splitter1) then
+    Splitter1.Color := Border;
+  if Assigned(Splitter2) then
+    Splitter2.Color := Border;
+  if Assigned(StatusBar1) then
+  begin
+    StatusBar1.Color := Bg;
+    StatusBar1.Font.Color := Fg;
+  end;
+end;
+
+// The canvas preview's palette. The built-in presets are Markdown4D's own
+// light/dark themes; custom picks up Md4dTheme.json (a theme exported with
+// Markdown4D's Theme.SaveToJson) when the custom theme is selected.
+procedure TForm1.ApplyCanvasTheme(ADark: Boolean);
+var
+  Preset: TMarkdownThemePreset;
+  FileName: string;
+  Custom: TMarkdownTheme;
+begin
+  if not Assigned(PreviewMd4D) then
+    Exit;
+
+  Preset := ThemePresetOf(ADark);
+  FileName := ExtractFilePath(ParamStr(0)) + 'Md4dTheme.json';
+  if (SelectedTheme = atCUSTOM) and FileExists(FileName) then
+  begin
+    Custom := TMarkdownTheme.CreatePreset(Preset);
+    try
+      Custom.LoadFromJson(LoadFileToStr(FileName));
+    except
+      // a broken file must not take the preview down: the preset stays
+      FreeAndNil(Custom);
+    end;
+    if Assigned(Custom) then
+    begin
+      PreviewMd4D.Theme := Custom; // the viewer borrows it, MDPad owns it
+      FreeAndNil(FCanvasTheme);
+      FCanvasTheme := Custom;
+      Exit;
+    end;
+  end;
+
+  PreviewMd4D.ThemePreset := Preset;
+  FreeAndNil(FCanvasTheme);
+end;
+
+// The previews' style sheet: the theme's base sheet, plus the user's style.css
+// on top of it when "Enable Custom Style" is on. PreviewCSS is what the JS
+// engines are loaded with (their HEADER opens the head); PreviewHtmlHead is the
+// whole head the native HTML preview is rendered into.
+procedure TForm1.RefreshPreviewStyle(ADark: Boolean);
+var
+  Css, Extra, FileName: string;
+begin
+  if ADark then
+    Css := HTMLCSSDARK
+  else
+    Css := HTMLCSSLIGHT;
+
+  if mnuCSS.Checked then
+  begin
+    // style.css has always been a customization of the preview's look, not a
+    // palette of its own, so it rides on top of the theme's rules.
+    FileName := ExtractFilePath(ParamStr(0)) + 'style.css';
+    if FileExists(FileName) then
+    begin
+      Extra := LoadFileToStr(FileName);
+      if Extra <> '' then
+        Css := Css + sLineBreak + Extra;
+    end;
+  end;
+  Css := Css + sLineBreak + '</style>';
+
+  PreviewCSS := Css + '</head>';
+  PreviewHtmlHead := '<!DOCTYPE html>' + sLineBreak
+    + '<html><head><meta http-equiv="X-UA-Compatible" content="IE=9" />'
+    + '<meta charset="utf-8" /><title>MDPad</title>'
+    + Css + '</head><body>';
+end;
+
+// Reads the custom theme file. Theme.json is BCEditor's theme format, the one
+// MDPad has always shipped: Colors/Editor/Colors paints the editor's surface,
+// the Elements list colors the token classes (mapped onto EControl's formats by
+// EcontrolNamesForTheme). ADark is what the editor background asks for, and the
+// rest of the app follows it so the editor and the previews agree.
+procedure TForm1.LoadCustomTheme(out ADark: Boolean; out AOverrides: TThemeOverrides);
+var
+  FileName, Text: string;
+  Root, Colors, Editor, Obj, Element: TJSONObject;
+  Arr: TJSONArray;
+  V: TJSONValue;
+  I: Integer;
+  Items: TThemeOverrides;
+  Bg: TColor;
+
+  procedure AddEntry(const AName: string; const AFore, ABack: TColor;
+    AHasBg: Boolean; const AStyle: TFontStyles; AHasStyle: Boolean);
+  var
+    N: Integer;
+  begin
+    N := Length(Items);
+    SetLength(Items, N + 1);
+    Items[N].Name := AName;
+    Items[N].FontColor := AFore;
+    Items[N].BgColor := ABack;
+    Items[N].HasBg := AHasBg;
+    Items[N].Style := AStyle;
+    Items[N].HasStyle := AHasStyle;
+  end;
+
+  function ElementStyle(const S: string): TFontStyles;
+  begin
+    Result := [];
+    if Pos('Bold', S) > 0 then
+      Include(Result, fsBold);
+    if Pos('Italic', S) > 0 then
+      Include(Result, fsItalic);
+    if Pos('Underline', S) > 0 then
+      Include(Result, fsUnderline);
+    if Pos('Strike', S) > 0 then
+      Include(Result, fsStrikeOut);
+  end;
+
+begin
+  ADark := False;
+  Items := nil;
+  AOverrides := nil;
+
+  FileName := ExtractFilePath(ParamStr(0)) + 'Theme.json';
+  if not FileExists(FileName) then
+  begin
+    AOverrides := Items;
+    Exit;
+  end;
+
+  V := TJSONObject.ParseJSONValue(UTF8String(LoadFileToStr(FileName)));
+  if not (V is TJSONObject) then
+  begin
+    V.Free;
+    AOverrides := Items;
+    Exit;
+  end;
+
+  Root := TJSONObject(V);
+  try
+    Colors := JsonChildObject(Root, 'Colors');
+    if Assigned(Colors) then
+    begin
+      Editor := JsonChildObject(Colors, 'Editor');
+      Obj := JsonChildObject(Editor, 'Colors');
+      if Assigned(Obj) then
+      begin
+        Bg := ThemeColorFromString(JsonText(Obj, 'Background'));
+        if Bg <> clNone then
+          ADark := ColorLuminance(Bg) < 128;
+        for I := 0 to Obj.Count - 1 do
+          AddEntry(UTF8Encode(Obj.Pairs[I].JsonString.Value),
+            ThemeColorFromString(JsonText(Obj, UTF8Encode(Obj.Pairs[I].JsonString.Value))),
+            clNone, False, [], False);
+      end;
+
+      Arr := JsonChildArray(Colors, 'Elements');
+      if Assigned(Arr) then
+        for I := 0 to Arr.Count - 1 do
+        begin
+          if not (Arr[I] is TJSONObject) then
+            Continue;
+          Element := TJSONObject(Arr[I]);
+          AddEntry(JsonText(Element, 'Name'),
+            ThemeColorFromString(JsonText(Element, 'Foreground')),
+            ThemeColorFromString(JsonText(Element, 'Background')),
+            Element.GetValue('Background') <> nil,
+            ElementStyle(JsonText(Element, 'Style')),
+            Element.GetValue('Style') <> nil);
+        end;
+    end;
+  finally
+    Root.Free;
+  end;
+
+  AOverrides := Items;
+end;
+
+// Paints every surface with the picked theme: the editor (its own colors and
+// the EControl token colors), the table of contents and the window chrome, and
+// whichever preview backend is on duty. AReloadPreview is False during startup,
+// when there is no document to re-render yet.
+procedure TForm1.ApplyTheme(AReloadPreview: Boolean);
+var
+  Dark: Boolean;
+  Overrides: TThemeOverrides;
+begin
+  Overrides := nil;
+  case SelectedTheme of
+    atDARK:
+      Dark := True;
+    atLIGHT:
+      Dark := False;
+    atSYSTEM:
+      Dark := SystemPrefersDark;
+  else
+    // Custom: the background Theme.json asks the editor for decides whether the
+    // rest of the app is painted light or dark.
+    Dark := False;
+    LoadCustomTheme(Dark, Overrides);
+  end;
+
+  if Assigned(BCEditor1) then
+  begin
+    SetEditorPalette(BCEditor1.Colors, Dark);
+    if SelectedTheme = atCUSTOM then
+      ApplyEditorOverrides(BCEditor1.Colors, Overrides);
+    BCEditor1.Invalidate;
+  end;
+
+  if Assigned(Manager) then
+  begin
+    SetLexerPalette(Manager, Dark);
+    if SelectedTheme = atCUSTOM then
+      ApplyLexerOverrides(Manager, Overrides);
+  end;
+
+  ApplyChromeColors(Dark);
+  ApplyCanvasTheme(Dark);
+  RefreshPreviewStyle(Dark);
+  UpdateThemeInMenu;
+
+  // Colors (and, for the canvas, fonts) changed: the HTML anchor table and the
+  // editor/preview pairing describe the old rendering.
+  InvalidateHtmlAnchors;
+  InvalidateScrollSync;
+
+  if not AReloadPreview then
+    Exit;
+
+  if UsingMarkdown4D then
+    // SetTheme/SetThemePreset already laid the document out again and asked for
+    // a repaint; the next sync tick re-anchors the view.
+    Exit;
+
   {$IFDEF MSWINDOWS}
   if UsingIE then
   begin
+    // The JS engines live in the IE document itself: it has to be built again
+    // with the new sheet, and the markdown pushed into it after that.
+    LoadEngine;
     ReloadingEngine := True;
     Screen.Cursor := crHourGlass;
-  end
-  else
+    Exit;
+  end;
   {$ENDIF}
-    UpdateResult;
+
+  // The native HTML preview re-renders through the worker, which puts the new
+  // PreviewHtmlHead in front of the same body.
+  UpdateResult;
 end;
 
+
+// "Enable Custom Style": puts the user's style.css on top of the theme's own
+// sheet. Only the previews carry a style sheet, so re-applying the theme
+// reloads them with the new one; the editor palette is unaffected.
+procedure TForm1.mnuCSSClick(Sender: TObject);
+begin
+  if not (Sender is TMenuItem) then
+    Exit;
+  TMenuItem(Sender).Checked := not TMenuItem(Sender).Checked;
+  SaveINI;
+  ApplyTheme(True);
+end;
+
+// "Enable Syntax highlighter": with it off the EControl lexer is detached from
+// the editor (Adapter.Lexer := nil), which is what makes the editor plain text
+// -- no token colors, no folding, no parse on keypress. The pick is written to
+// settings.ini right here, like the engine and the preview backend.
 procedure TForm1.mnuSyntaxClick(Sender: TObject);
-var
-  chk: boolean;
-  st: TStringStream;
 begin
-  chk := not TMenuItem(sender).Checked;
-  TMenuItem(sender).Checked := chk;
-
-  if chk then
-  begin
-    {{if FileExists(ExtractFilePath(ParamStr(0))+'Markdown.json') then
-      BCEditor1.Highlighter.LoadFromFile(ExtractFilePath(ParamStr(0))+'MarkDown.json');}
-  end
-  else
-  begin
-    (*(*st := TStringStream.Create('{}');
-    try
-      BCEditor1.Highlighter.LoadFromStream(st);
-    finally
-      FreeAndNil(st);
-    end;*)
-  end;
+  if not (Sender is TMenuItem) then
+    Exit;
+  TMenuItem(Sender).Checked := not TMenuItem(Sender).Checked;
+  SaveINI;
+  ApplySyntaxEnabled;
 end;
 
-procedure TForm1.mnuThemeClick(Sender: TObject);
-var
-  chk : boolean;
-  st: TStringStream;
+// The picks of the Theme submenu: System, Light, Dark, Custom (the item Tag is
+// the TAppTheme value, see markdownviewer_src.lfm).
+procedure TForm1.mnuThemeSelect(Sender: TObject);
 begin
-  chk := not TMenuItem(sender).Checked;
-  TMenuItem(sender).Checked := chk;
-
-  if chk then
-  begin
-    {{if FileExists(ExtractFilePath(ParamStr(0))+'Theme.json') then
-      BCEditor1.Highlighter.Colors.LoadFromFile(ExtractFilePath(ParamStr(0))+ 'Theme.json');}
-  end
-  else
-  begin
-    {{st := TStringStream.Create(DEFAULTTHEME);
-    try
-      BCEditor1.Highlighter.Colors.LoadFromStream(st);
-    finally
-      FreeAndNil(st);
-    end;}
-  end;
+  if not (Sender is TMenuItem) then
+    Exit;
+  SelectedTheme := TAppTheme(TMenuItem(Sender).Tag);
+  UpdateThemeInMenu;
+  // The picked theme is what the next start should use, so it goes to disk
+  // right here: the save on exit never runs if the process is killed.
+  SaveINI;
+  ApplyTheme(True);
 end;
 
 // by default
