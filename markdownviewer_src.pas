@@ -334,6 +334,20 @@ type
     procedure AddHtmlAnchor(ALine, AY: Integer);
     function HtmlLineToY(ALine: Integer; out AY: Integer): Boolean;
     function HtmlYToLine(AY: Integer; out ALine: Integer): Boolean;
+    // The document's table of contents. It cannot come from EControl: lib.lxl's
+    // Markdown lexer declares no tree rules at all (only Bash, C and PHP have
+    // them), so the code tree would be empty for a markdown document. The
+    // headings are the ones the engine rendered -- the same list the HTML
+    // preview's anchors are built from -- so an entry is exactly a heading of
+    // the preview, on the line it was written.
+    procedure UpdateTOC;
+    procedure ClearTOC;
+    function TocMatchesHeaders: Boolean;
+    // A click on an entry goes to that line in both panes (JumpToSourceLine),
+    // using the TATRangeInCodeTree each node carries, the type EControl's own
+    // nodes used -- so the tree keeps following the caret as it did.
+    procedure TreeClick(Sender: TObject);
+    procedure JumpToSourceLine(ALine: Integer);
     // Images the document names relative to itself have to resolve next to the
     // document, not relative to wherever MDPad was started from.
     procedure ApplyPreviewBaseFolder;
@@ -364,7 +378,6 @@ type
 
     procedure EditorChangeCaretPos(Sender: TObject);
     procedure AdapterParseDone(Sender: TObject; ATime: integer);
-    procedure AdapterParseBegin(Sender: TObject);
 
     {$IFDEF MSWINDOWS}
     procedure CMDialogKey(var Message: TCMDialogKey); message CM_DIALOGKEY;
@@ -510,9 +523,11 @@ begin
      LastPreviewBody := FHtmlResult;
      PreviewHtml.Text := GITHUBCSS + FHtmlResult + '</body></html>';
      // The headings of the HTML just rendered are the anchor points the scroll
-     // sync needs; the form owns them from here on.
+     // sync needs and the entries of the table of contents; the form owns them
+     // from here on.
      Form1.AdoptHeaders(FHeaders);
      FHeaders := nil;
+     Form1.UpdateTOC;
      // A fresh load parks the preview at the top: put it back where the editor
      // is right away instead of at the next tick (no jump while typing).
      if Form1.Synceditwithpreview1.Checked then
@@ -535,8 +550,8 @@ begin
     begin
       // Markdown4D renders markdown -> HTML in process: its Core is plain
       // Pascal and the shared pipeline cache is monitor-guarded, so a worker
-      // thread is fine. No header list here: the code tree comes from the
-      // EControl adapter, not from the engine.
+      // thread is fine. No header list here (the renderer hands none over), so
+      // the preview's anchors and the table of contents stay empty for it.
       //
       // UnsafeHtml (not ToHtml) on purpose: it keeps raw HTML in the document,
       // which is what the other engines do (MyWiki; the JS ones on Windows) and
@@ -1088,10 +1103,16 @@ begin
     Manager.LoadFromFile(feditor);
 
   Adapter := TATAdapterEControl.Create(Self);
-  Adapter.OnParseBegin:=AdapterParseBegin;
-  Adapter.OnParseDone:=AdapterParseDone;
+  // OnParseDone, but not OnParseBegin: the latter clears the tree on every
+  // parse, which would wipe the table of contents. EControl's own tree only
+  // exists for the lexers that ask for it (markdown is not one of them) -- see
+  // AdapterParseDone and UpdateTOC.
+  Adapter.OnParseDone := AdapterParseDone;
   Adapter.AddEditor(BCEditor1);
   Adapter.Lexer := Lexer_FindForFilename(Manager, CurrentFile);
+  // The code tree doubles as the table of contents: a click on a heading goes
+  // there in both panes.
+  Tree.OnClick := TreeClick;
 
 //  memo1.Visible:=false;
 //////////////////  BCEditor1.ScrollBars:=ssBoth;
@@ -1259,6 +1280,7 @@ begin
 //save ini settings
   SaveINI;
   FreeAndNil(FHeaders);
+  ClearTOC;
   BCEditor1.Text := '';
   BCEditor1.Free;
   {$IFDEF MSWINDOWS}
@@ -1778,8 +1800,10 @@ begin
   // the native engine renders the markdown on UpdateResult
   PreviewHtml.LoadFromString(HEADER + PreviewCSS + OPENCONTAINER + DefaultText + CLOSECONTAINER + FOOTER);
   // LoadEngine runs on a new document (or a backend switch), so the heading list
-  // and the anchor table of the previous one no longer describe the preview.
+  // and the anchor table of the previous one no longer describe the preview, and
+  // the table of contents is rebuilt from whatever the new engine renders.
   AdoptHeaders(nil);
+  UpdateTOC;
   InvalidateScrollSync;
 end;
 
@@ -1797,15 +1821,160 @@ begin
   //empty
 end;
 
+// EControl fills the tree only for the lexers whose rules ask for it (Bash, C,
+// PHP): its Markdown lexer asks for none, so for a markdown document the tree is
+// the table of contents UpdateTOC builds from the rendered headings instead.
 procedure TForm1.AdapterParseDone(Sender: TObject; ATime: integer);
 begin
-  adapter.TreeFill(Tree, 1000, false, '?', @_OnTreeDuplicateNode);
+  if (Adapter.Lexer <> nil) and (Adapter.Lexer.LexerName = 'Markdown') then
+    UpdateTOC
+  else
+  begin
+    // Free the ranges of the previous fill before EControl drops those nodes.
+    ClearTOC;
+    adapter.TreeFill(Tree, 1000, false, '?', @_OnTreeDuplicateNode);
+  end;
   EditorChangeCaretPos(Self);
 end;
 
-procedure TForm1.AdapterParseBegin(Sender: TObject);
+// LCL does not own what a node points at, so the ranges MDPad creates have to
+// go before the nodes that refer to them.
+procedure TForm1.ClearTOC;
+var
+  Index: Integer;
 begin
+  for Index := 0 to Tree.Items.Count - 1 do
+    if (Tree.Items[Index].Data <> nil)
+    and (TObject(Tree.Items[Index].Data) is TATRangeInCodeTree) then
+      TObject(Tree.Items[Index].Data).Free;
   Tree.Items.Clear;
+end;
+
+// A render happens on every keystroke, and rebuilding the tree each time would
+// throw away where the user scrolled it: the headings are compared first.
+function TForm1.TocMatchesHeaders: Boolean;
+var
+  Index: Integer;
+begin
+  Result := False;
+  if (FHeaders = nil) or (Tree.Items.Count <> FHeaders.Count) then
+    Exit;
+  for Index := 0 to FHeaders.Count - 1 do
+  begin
+    if (Tree.Items[Index].Text <> FHeaders[Index].Caption)
+    or (Tree.Items[Index].Data = nil)
+    or not (TObject(Tree.Items[Index].Data) is TATRangeInCodeTree)
+    or (TATRangeInCodeTree(Tree.Items[Index].Data).PosBegin.Y <> FHeaders[Index].Line) then
+      Exit;
+  end;
+  Result := True;
+end;
+
+// Fills the code tree with the document's headings, indented by their level.
+// Each node carries a TATRangeInCodeTree over its section (the heading's line up
+// to the line before the next heading, whatever its level), which is both the
+// line TreeClick jumps to and what keeps CodetreeSelectItemForPosition selecting
+// the heading the caret is reading. A backend whose engine renders no heading
+// list (the canvas one) leaves the tree empty, as it was.
+procedure TForm1.UpdateTOC;
+var
+  Index, Level, ParentLevel, NextLine: Integer;
+  Line, LastLine: Integer;
+  Parents: array[1..6] of TTreeNode;
+  Node: TTreeNode;
+  Range: TATRangeInCodeTree;
+begin
+  if TocMatchesHeaders then
+  begin
+    EditorChangeCaretPos(Self);
+    Exit;
+  end;
+
+  ClearTOC;
+  if FHeaders = nil then
+    Exit;
+  for Level := Low(Parents) to High(Parents) do
+    Parents[Level] := nil;
+  LastLine := BCEditor1.Strings.Count - 1;
+  if LastLine < 0 then
+    LastLine := 0;
+
+  Tree.Items.BeginUpdate;
+  try
+    for Index := 0 to FHeaders.Count - 1 do
+    begin
+      Line := FHeaders[Index].Line;
+      if (Line < 0) or (Trim(FHeaders[Index].Caption) = '') then
+        Continue;
+      if Index < FHeaders.Count - 1 then
+        NextLine := FHeaders[Index + 1].Line
+      else
+        NextLine := LastLine + 1;
+      Range := TATRangeInCodeTree.Create;
+      Range.PosBegin := Point(0, Line);
+      Range.PosEnd := Point(High(Integer), Max(Line, NextLine - 1));
+
+      Level := FHeaders[Index].Level;
+      if Level < Low(Parents) then
+        Level := Low(Parents)
+      else if Level > High(Parents) then
+        Level := High(Parents);
+      Node := nil;
+      for ParentLevel := Level - 1 downto Low(Parents) do
+        if Parents[ParentLevel] <> nil then
+        begin
+          Node := Parents[ParentLevel];
+          Break;
+        end;
+      Node := Tree.Items.AddChildObject(Node, FHeaders[Index].Caption, Range);
+      Parents[Level] := Node;
+      // A deeper heading after this one starts its own subtree.
+      for ParentLevel := Level + 1 to High(Parents) do
+        Parents[ParentLevel] := nil;
+    end;
+  finally
+    Tree.Items.EndUpdate;
+  end;
+  Tree.FullExpand;
+  EditorChangeCaretPos(Self);
+end;
+
+// The tree is the table of contents: a click on a heading goes to that line in
+// both panes.
+procedure TForm1.TreeClick(Sender: TObject);
+var
+  Node: TTreeNode;
+begin
+  Node := Tree.Selected; // the node the click just selected
+  if (Node = nil) or (Node.Data = nil) then
+    Exit;
+  // Group nodes are plain text and carry no range.
+  if not (TObject(Node.Data) is TATRangeInCodeTree) then
+    Exit;
+  JumpToSourceLine(TATRangeInCodeTree(Node.Data).PosBegin.Y);
+end;
+
+// Takes both panes to a source line: the caret and the editor's top line, and
+// the preview to the Y that line was rendered at -- the same maps the scroll
+// sync uses, so the heading lands at the top of both. This is a jump the user
+// asked for, so it works whether or not the panes are following each other;
+// SyncEditorToPreview also records the new position, which leaves the next tick
+// seeing both panes already in agreement.
+procedure TForm1.JumpToSourceLine(ALine: Integer);
+begin
+  if (ALine < 0) or (ALine > BCEditor1.Strings.Count - 1) then
+    Exit;
+  if BCEditor1.Carets.Count = 0 then
+    Exit;
+
+  with BCEditor1.Carets[0] do
+  begin
+    PosX := 0; PosY := ALine;
+    EndX := 0; EndY := ALine;
+  end;
+  BCEditor1.DoShowPos(Point(0, ALine), 0, 0, True, True, True);
+  SetEditorTopLine(ALine);
+  SyncEditorToPreview;
 end;
 
 procedure TForm1.LoadINI;
