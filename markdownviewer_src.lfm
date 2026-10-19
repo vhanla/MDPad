@@ -1864,6 +1864,9 @@ object Form1: TForm1
         ShortCut = 16463
         OnClick = Open1Click
       end
+      object mnuRecent: TMenuItem
+        Caption = 'Open &recent'
+      end
       object Save1: TMenuItem
         Caption = '&Save'
         ShortCut = 16467
@@ -1898,6 +1901,13 @@ object Form1: TForm1
       end
       object Preferences1: TMenuItem
         Caption = 'Pre&ferences'
+        object mnuPrefOptions: TMenuItem
+          Caption = '&Options...'
+          OnClick = mnuOptionsClick
+        end
+        object mnuPrefSep: TMenuItem
+          Caption = '-'
+        end
         object Registerfilestoopenwith1: TMenuItem
           Caption = '&Make it default editor'
           OnClick = Registerfilestoopenwith1Click
@@ -1999,6 +2009,51 @@ object Form1: TForm1
         OnClick = Wordwrap1Click
       end
       object Font1: TMenuItem
+        Caption = '&Font...'
+        OnClick = Font1Click
+      end
+    end
+    object mnuEditor: TMenuItem
+      Caption = '&Editor'
+      object mnuEditorOptions: TMenuItem
+        Caption = '&Options...'
+        OnClick = mnuOptionsClick
+      end
+      object mnuEditorSep: TMenuItem
+        Caption = '-'
+      end
+      object mnuEditorGutter: TMenuItem
+        Tag = 0
+        Caption = '&Gutter'
+        Checked = True
+        OnClick = mnuEditorToggleClick
+      end
+      object mnuEditorRuler: TMenuItem
+        Tag = 1
+        Caption = '&Ruler'
+        Checked = True
+        OnClick = mnuEditorToggleClick
+      end
+      object mnuEditorMinimap: TMenuItem
+        Tag = 2
+        Caption = '&Minimap'
+        OnClick = mnuEditorToggleClick
+      end
+      object mnuEditorUnprinted: TMenuItem
+        Tag = 3
+        Caption = '&Unprintable characters'
+        Checked = True
+        OnClick = mnuEditorToggleClick
+      end
+      object mnuEditorWrap: TMenuItem
+        Tag = 4
+        Caption = '&Word wrap'
+        OnClick = mnuEditorToggleClick
+      end
+      object mnuEditorSep2: TMenuItem
+        Caption = '-'
+      end
+      object mnuEditorFont: TMenuItem
         Caption = '&Font...'
         OnClick = Font1Click
       end

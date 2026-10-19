@@ -157,6 +157,10 @@
         <ResourceBaseClass Value="Form"/>
       </Unit>
       <Unit>
+        <Filename Value="mdoptions.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
         <Filename Value="markdownprocessor.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit>

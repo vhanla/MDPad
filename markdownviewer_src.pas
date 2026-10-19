@@ -90,6 +90,7 @@ uses
     ATSynEdit_Bookmarks,
     ATSynEdit_Export_HTML,
     ATSynEdit_Globals,
+  mdoptions, IniFiles,
   ec_SyntAnal,
   ec_proc_lexer,
   HtmlView, HtmlGlobals,
@@ -263,6 +264,19 @@ type
     mnuThemeDark: TMenuItem;
     mnuThemeCustom: TMenuItem;
     mnuCSS: TMenuItem;
+    mnuRecent: TMenuItem;
+    mnuEditor: TMenuItem;
+    mnuEditorOptions: TMenuItem;
+    mnuEditorSep: TMenuItem;
+    mnuEditorGutter: TMenuItem;
+    mnuEditorRuler: TMenuItem;
+    mnuEditorMinimap: TMenuItem;
+    mnuEditorUnprinted: TMenuItem;
+    mnuEditorWrap: TMenuItem;
+    mnuEditorSep2: TMenuItem;
+    mnuEditorFont: TMenuItem;
+    mnuPrefOptions: TMenuItem;
+    mnuPrefSep: TMenuItem;
     procedure FormCreate(Sender: TObject);
     procedure FormMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
@@ -324,6 +338,10 @@ type
     procedure mnuSyntaxClick(Sender: TObject);
     procedure mnuThemeSelect(Sender: TObject);
     procedure mnuCSSClick(Sender: TObject);
+    procedure mnuRecentClick(Sender: TObject);
+    procedure mnuRecentClearClick(Sender: TObject);
+    procedure mnuOptionsClick(Sender: TObject);
+    procedure mnuEditorToggleClick(Sender: TObject);
     procedure Loadremoteimages1Click(Sender: TObject);
     procedure BCEditor1CaretChanged(Sender: TObject);
     procedure EditorPopupClick(Sender: TObject);
@@ -340,6 +358,17 @@ type
     // The viewer borrows the theme it is given (it only frees the presets it
     // creates itself), so this is what frees it.
     FCanvasTheme: TMarkdownTheme;
+
+    // Recent files: full paths, most recent first, capped by FMRULimit. The
+    // File > Open recent submenu is built from it (see RebuildRecentMenu).
+    FMRU: TStringList;
+    FMRULimit: Integer;
+
+    // What the editor's options are (mdoptions.pas). The Options dialog edits
+    // this record, LoadINI/SaveINI store it and ApplyEditorOptions is the only
+    // place that writes it into BCEditor1 -- so the quick toggles in the Editor
+    // menu, the dialog and a hand edited settings.ini cannot disagree.
+    FEditorOpts: TEditorOptions;
 
     FCurrentRequestID: Int64; // A unique, increment ID for each conversion request
     FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
@@ -454,6 +483,19 @@ type
 
     procedure SaveINI;
     procedure LoadINI;
+    procedure RebuildRecentMenu;
+    procedure AddToMRU(const AFile: string);
+    procedure RemoveFromMRU(const AFile: string);
+    function CanOpenAnotherFile: Boolean;
+    function GutterBandVisible(ATag: Integer): Boolean;
+    procedure SetGutterBandVisible(ATag: Integer; AValue: Boolean);
+    procedure CaptureEditorOptions;
+    procedure ApplyEditorOptions;
+    procedure LoadEditorOptions(ini: TIniFile);
+    procedure SaveEditorOptions(ini: TIniFile);
+    procedure UpdateEditorMenuChecks;
+    function BuildPreviewList: TIdCaptionArray;
+    function BuildEngineList: TIdCaptionArray;
 
     procedure UpdateEngineInMenu;
     procedure LoadEngine(const DefaultText: string = '');
@@ -539,7 +581,7 @@ var
 {$include pagedown.inc}
 
 implementation
-uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} inifiles, LCLIntf, Printers, PrintersDlgs, Types, Math,
+uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} LCLIntf, Printers, PrintersDlgs, Types, Math,
   // TATEditorColors, the editor's palette record (see SetEditorPalette).
   ATSynEdit_Colors,
   // TecSyntaxFormat: the per-token colors of a lexer (see SetLexerFormat).
@@ -1570,6 +1612,7 @@ begin
         BCEditor1.SaveToFile(FileName);
         CurrentFile:=FileName;
         Caption:='MDPad - '+FileName;
+        AddToMRU(FileName);
         if Assigned(Adapter) then
           Adapter.Lexer := LexerForCurrentFile;
         textBuffer:=BCEditor1.Text;
@@ -1749,10 +1792,15 @@ end;
 
 procedure TForm1.Font1Click(Sender: TObject);
 begin
-  FontDialog1.Font:=BCEditor1.Font;
+  // The font is one of the stored editor options now (it used to be reset to
+  // Consolas on every start), so the pick goes through the record and is saved.
+  FontDialog1.Font.Assign(BCEditor1.Font);
   if FontDialog1.Execute() then
   begin
-    BCEditor1.Font:= FontDialog1.Font;
+    FEditorOpts.FontName := FontDialog1.Font.Name;
+    FEditorOpts.FontSize := FontDialog1.Font.Size;
+    ApplyEditorOptions;
+    SaveINI;
   end;
 end;
 
@@ -1914,7 +1962,16 @@ begin
   BCEditor1.Font.Size:=11;
   BCEditor1.OptWrapIndented:= True;
 
+  // Recent files are loaded by LoadINI, which also builds the submenu.
+  FMRU := TStringList.Create;
+  FMRULimit := 10;
+
   LoadINI;
+
+  // Push the options LoadINI read into the editor before the first paint, and
+  // bring the Editor menu's checks in line with them.
+  ApplyEditorOptions;
+  UpdateEditorMenuChecks;
 
   // Paint the editor and every preview with the picked theme before anything
   // is loaded, so the first document is already rendered into the right sheet
@@ -1946,9 +2003,11 @@ begin
   begin
     ReadingFromExplorer:=False;
     if ParamCount>0 then
+    begin
       OpenMDFile(ParamStr(1));
+      AddToMRU(ParamStr(1));
+    end;
   end;
-
 end;
 
 procedure TForm1.FormDestroy(Sender: TObject);
@@ -1967,6 +2026,7 @@ begin
   end;
   FreeAndNil(FHeaders);
   ClearTOC;
+  FreeAndNil(FMRU);
   BCEditor1.Text := '';
   BCEditor1.Free;
   {$IFDEF MSWINDOWS}
@@ -2288,6 +2348,7 @@ end;
 procedure TForm1.SaveINI;
 var
 ini: TIniFile;
+i: Integer;
 begin
   ini:=TIniFile.Create(ExtractFilePath(ParamStr(0))+'settings.ini');
     try
@@ -2316,6 +2377,19 @@ begin
       ini.WriteString('MDPad', 'theme', ThemeToName(SelectedTheme));
       ini.WriteBool('MDPad', 'cssenabled', mnuCSS.Checked);
       ini.WriteBool('MDPad', 'remoteimages', Loadremoteimages1.Checked);
+
+      if Assigned(FMRU) then
+      begin
+        ini.WriteInteger('Files', 'mrucount', FMRULimit);
+        for i := 0 to FMRU.Count - 1 do
+          ini.WriteString('Files', 'mru' + IntToStr(i), FMRU[i]);
+        // Drop the keys the list no longer has, or a shortened list would come
+        // back on the next start.
+        for i := FMRU.Count to 29 do
+          ini.DeleteKey('Files', 'mru' + IntToStr(i));
+      end;
+
+      SaveEditorOptions(ini);
     finally
       ini.Free;
     end;
@@ -2700,6 +2774,8 @@ procedure TForm1.LoadINI;
 var
 ini:tinifile;
 theme: string;
+i: Integer;
+s: string;
 begin
   ini:=TIniFile.Create(ExtractFilePath(ParamStr(0))+'settings.ini');
     try
@@ -2715,8 +2791,10 @@ begin
       Statusbar2.Checked:=ini.ReadBool('MDPad','statusbar',false);
       StatusBar1.Visible:=Statusbar2.Checked;
       Wordwrap1.Checked:=ini.ReadBool('MDPad','wordwrap',false);
-
-      BCEditor1.OptWrapIndented := Wordwrap1.Checked;
+      // That legacy key used to toggle OptWrapIndented (the wrap indent), which
+      // only matters when wrapping is on -- so with wrapping off it looked dead.
+      // It is read as "wrapping on" by LoadEditorOptions now, and the menu check
+      // is taken from the editor options after that.
 
       ViewersRatio:=ini.ReadInteger('Window','editorposition',50);
       Width:=ini.ReadInteger('Window','width',771);
@@ -2759,6 +2837,26 @@ begin
       Loadremoteimages1.Checked := ini.ReadBool('MDPad', 'remoteimages', true);
       ApplyRemoteImagesSetting(False);
 
+      // Recent files: full paths, most recent first. The list's own length is
+      // the limit (the Options dialog picks it, 10 by default).
+      FMRULimit := ini.ReadInteger('Files', 'mrucount', 10);
+      if FMRULimit < 1 then
+        FMRULimit := 1;
+      if FMRULimit > 30 then
+        FMRULimit := 30;
+      FMRU.Clear;
+      for i := 0 to FMRULimit - 1 do
+      begin
+        s := ini.ReadString('Files', 'mru' + IntToStr(i), '');
+        if s <> '' then
+          FMRU.Add(s);
+      end;
+      RebuildRecentMenu;
+
+      // Editor options: seeded from the live editor, so a key this build does
+      // not write keeps the default ATSynEdit (and FormCreate) gave it.
+      LoadEditorOptions(ini);
+
       UpdateEngineInMenu;
       UpdatePreviewInMenu;
       UpdateThemeInMenu;
@@ -2777,6 +2875,765 @@ begin
   mnuThemeLight.Checked := SelectedTheme = atLIGHT;
   mnuThemeDark.Checked := SelectedTheme = atDARK;
   mnuThemeCustom.Checked := SelectedTheme = atCUSTOM;
+end;
+
+// Rebuild the File > Open recent submenu from FMRU. The items are created here
+// (the .lfm only declares the parent): the list is data, not layout.
+procedure TForm1.RebuildRecentMenu;
+var
+  i: Integer;
+  Item: TMenuItem;
+begin
+  if mnuRecent = nil then
+    Exit;
+  mnuRecent.Clear;
+  if FMRU.Count = 0 then
+  begin
+    Item := TMenuItem.Create(mnuRecent);
+    Item.Caption := '(no recent files)';
+    Item.Enabled := False;
+    mnuRecent.Add(Item);
+    Exit;
+  end;
+  for i := 0 to FMRU.Count - 1 do
+  begin
+    Item := TMenuItem.Create(mnuRecent);
+    // The number doubles as the accelerator; an ampersand in the path itself is
+    // escaped so a folder called "R&D" does not become one.
+    if i < 9 then
+      Item.Caption := '&' + IntToStr(i + 1) + ' ' +
+        StringReplace(FMRU[i], '&', '&&', [rfReplaceAll])
+    else
+      Item.Caption := '1&0 ' + StringReplace(FMRU[i], '&', '&&', [rfReplaceAll]);
+    Item.Tag := i;
+    Item.OnClick := mnuRecentClick;
+    mnuRecent.Add(Item);
+  end;
+  Item := TMenuItem.Create(mnuRecent);
+  Item.Caption := '-';
+  mnuRecent.Add(Item);
+  Item := TMenuItem.Create(mnuRecent);
+  Item.Caption := 'Clear list';
+  Item.OnClick := mnuRecentClearClick;
+  mnuRecent.Add(Item);
+end;
+
+// A file that was opened (or saved) goes to the top; opening it again moves it
+// there instead of listing it twice. Saved immediately, like the other picks.
+procedure TForm1.AddToMRU(const AFile: string);
+var
+  fn: string;
+  i: Integer;
+begin
+  if not Assigned(FMRU) then
+    Exit;
+  fn := ExpandFileName(AFile);
+  if not FileExists(fn) then
+    Exit;
+  i := FMRU.IndexOf(fn);
+  if i >= 0 then
+    FMRU.Delete(i);
+  FMRU.Insert(0, fn);
+  while FMRU.Count > FMRULimit do
+    FMRU.Delete(FMRU.Count - 1);
+  RebuildRecentMenu;
+  SaveINI;
+end;
+
+procedure TForm1.RemoveFromMRU(const AFile: string);
+begin
+  if not Assigned(FMRU) then
+    Exit;
+  if FMRU.IndexOf(ExpandFileName(AFile)) >= 0 then
+  begin
+    FMRU.Delete(FMRU.IndexOf(ExpandFileName(AFile)));
+    RebuildRecentMenu;
+    SaveINI;
+  end;
+end;
+
+procedure TForm1.mnuRecentClick(Sender: TObject);
+var
+  fn: string;
+  idx: Integer;
+begin
+  idx := TMenuItem(Sender).Tag;
+  if (idx < 0) or (idx >= FMRU.Count) then
+    Exit;
+  fn := FMRU[idx];
+  if not FileExists(fn) then
+  begin
+    // The list outlives the files it names: say so and forget the entry.
+    MessageDlg('This file no longer exists:'#13 + fn, mtWarning, [mbOK], 0);
+    RemoveFromMRU(fn);
+    Exit;
+  end;
+  if not CanOpenAnotherFile then
+    Exit;
+  AddToMRU(fn); // opening it makes it the most recent
+  OpenMDFile(fn);
+end;
+
+procedure TForm1.mnuRecentClearClick(Sender: TObject);
+begin
+  if not Assigned(FMRU) then
+    Exit;
+  FMRU.Clear;
+  RebuildRecentMenu;
+  SaveINI;
+end;
+
+// The "document has been modified" guard, shared by Open and Open recent. A
+// cancelled Save-as leaves the buffer untouched, so the open is cancelled too
+// instead of silently discarding the changes.
+function TForm1.CanOpenAnotherFile: Boolean;
+begin
+  if textBuffer = BCEditor1.Text then
+    Exit(True);
+  case MessageDlg('Your document has been modified'#13 +
+    'Do you want to save those changes?', mtConfirmation,
+    [mbYes, mbNo, mbCancel], 0) of
+    mrYes:
+      begin
+        Save1Click(Self);
+        Result := textBuffer = BCEditor1.Text;
+      end;
+    mrNo:
+      Result := True;
+  else
+    Result := False;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// Editor options
+//
+// One record (mdoptions.TEditorOptions) is what the Options dialog edits, what
+// settings.ini stores and what ApplyEditorOptions writes into BCEditor1.
+// CaptureEditorOptions seeds it from the live editor, so a settings.ini written
+// by an older build -- or one from which somebody deleted a key -- keeps the
+// ATSynEdit default for that key instead of a value invented here.
+// ---------------------------------------------------------------------------
+
+function TForm1.GutterBandVisible(ATag: Integer): Boolean;
+var
+  i: Integer;
+begin
+  i := BCEditor1.Gutter.FindIndexByTag(ATag);
+  Result := (i >= 0) and BCEditor1.Gutter[i].Visible;
+end;
+
+procedure TForm1.SetGutterBandVisible(ATag: Integer; AValue: Boolean);
+var
+  i: Integer;
+begin
+  i := BCEditor1.Gutter.FindIndexByTag(ATag);
+  if i >= 0 then
+    BCEditor1.Gutter[i].Visible := AValue;
+end;
+
+procedure TForm1.CaptureEditorOptions;
+begin
+  with FEditorOpts do
+  begin
+    ShowCurLine := BCEditor1.OptShowCurLine;
+    ShowCurLineMinimal := BCEditor1.OptShowCurLineMinimal;
+    ShowCurColumn := BCEditor1.OptShowCurColumn;
+    LastLineOnTop := BCEditor1.OptLastLineOnTop;
+    ShowFullWidthSel := BCEditor1.OptShowFullWidthForSelection;
+    ShowFullWidthHilite := BCEditor1.OptShowFullWidthForSyntaxHilite;
+    ShowIndentLines := BCEditor1.OptShowIndentLines;
+    ZebraActive := BCEditor1.OptZebraActive;
+    ZebraStep := BCEditor1.OptZebraStep;
+    ShowScrollHint := BCEditor1.OptShowScrollHint;
+    TextHint := BCEditor1.OptTextHint;
+    WrapMode := Ord(BCEditor1.OptWrapMode);
+    WrapIndented := BCEditor1.OptWrapIndented;
+    GutterVisible := BCEditor1.OptGutterVisible;
+    GutterNumbers := GutterBandVisible(ATEditorOptions.GutterTagNumbers);
+    GutterBookmarks := GutterBandVisible(ATEditorOptions.GutterTagBookmarks);
+    GutterFolding := GutterBandVisible(ATEditorOptions.GutterTagFolding);
+    GutterStates := GutterBandVisible(ATEditorOptions.GutterTagLineStates);
+    GutterSeparator := GutterBandVisible(ATEditorOptions.GutterTagSeparator);
+    NumbersStyle := Ord(BCEditor1.OptNumbersStyle);
+    NumbersAlignment := Ord(BCEditor1.OptNumbersAlignment);
+    NumbersShowFirst := BCEditor1.OptNumbersShowFirst;
+    NumbersShowCarets := BCEditor1.OptNumbersShowCarets;
+    GutterCaretBG := BCEditor1.OptShowGutterCaretBG;
+    RulerVisible := BCEditor1.OptRulerVisible;
+    RulerHeight := BCEditor1.OptRulerHeightPercents;
+    RulerFontSize := BCEditor1.OptRulerFontSizePercents;
+    RulerTopIndent := BCEditor1.OptRulerTopIndentPercents;
+    RulerStyle := Ord(BCEditor1.OptRulerNumeration);
+    MinimapVisible := BCEditor1.OptMinimapVisible;
+    MinimapCharWidth := BCEditor1.OptMinimapCharWidth;
+    MinimapSelBorder := BCEditor1.OptMinimapShowSelBorder;
+    MinimapSelAlways := BCEditor1.OptMinimapShowSelAlways;
+    UnprintedVisible := BCEditor1.OptUnprintedVisible;
+    UnprintedSpaces := BCEditor1.OptUnprintedSpaces;
+    UnprintedSpacesTrailing := BCEditor1.OptUnprintedSpacesTrailing;
+    UnprintedSpacesBothEnds := BCEditor1.OptUnprintedSpacesBothEnds;
+    UnprintedEnds := BCEditor1.OptUnprintedEnds;
+    UnprintedEndsDetails := BCEditor1.OptUnprintedEndsDetails;
+    UnprintedReplaceSpec := ATEditorOptions.UnprintedReplaceSpec;
+    UnprintedEndSymbol := Ord(ATEditorOptions.UnprintedEndSymbol);
+    UnprintedTabScale := ATEditorOptions.UnprintedTabPointerScale;
+    TabSpaces := BCEditor1.OptTabSpaces;
+    TabSize := BCEditor1.OptTabSize;
+    IndentSize := BCEditor1.OptIndentSize;
+    AutoIndent := BCEditor1.OptAutoIndent;
+    AutoIndentKind := Ord(BCEditor1.OptAutoIndentKind);
+    TabIndents := BCEditor1.OptKeyTabIndents;
+    BackspaceUnindent := BCEditor1.OptKeyBackspaceUnindent;
+    BackspaceGoesPrev := BCEditor1.OptKeyBackspaceGoesToPrevLine;
+    IndentKeepsAlign := BCEditor1.OptIndentKeepsAlign;
+    OverwriteSel := BCEditor1.OptOverwriteSel;
+    NavUpDownWrapped := BCEditor1.OptKeyUpDownNavigateWrapped;
+    UpDownAllowToEdge := BCEditor1.OptKeyUpDownAllowToEdge;
+    UpDownKeepColumn := BCEditor1.OptKeyUpDownKeepColumn;
+    NavHomeEndWrapped := BCEditor1.OptKeyHomeEndNavigateWrapped;
+    HomeToNonSpace := BCEditor1.OptKeyHomeToNonSpace;
+    EndToNonSpace := BCEditor1.OptKeyEndToNonSpace;
+    PageKeepsRelative := BCEditor1.OptKeyPageKeepsRelativePos;
+    PageSize := Ord(BCEditor1.OptKeyPageUpDownSize);
+    LeftRightSwapSel := BCEditor1.OptKeyLeftRightSwapSel;
+    MouseNormalSel := BCEditor1.OptMouseEnableNormalSelection;
+    MouseColumnSel := BCEditor1.OptMouseEnableColumnSelection;
+    Mouse2ClickAction := Ord(BCEditor1.OptMouse2ClickAction);
+    Mouse3ClickSelectsLine := BCEditor1.OptMouse3ClickSelectsLine;
+    Mouse2ClickDragSelectsWords := BCEditor1.OptMouse2ClickDragSelectsWords;
+    MouseClickNumberSelectsLine := BCEditor1.OptMouseClickNumberSelectsLine;
+    MouseDragDrop := BCEditor1.OptMouseDragDrop;
+    MouseRightClickMovesCaret := BCEditor1.OptMouseRightClickMovesCaret;
+    MouseMiddleClickAction := Ord(BCEditor1.OptMouseMiddleClickAction);
+    MouseHideCursorOnType := BCEditor1.OptMouseHideCursorOnType;
+    MouseClickOpensURL := BCEditor1.OptMouseClickOpensURL;
+    CaretBlinkEnabled := BCEditor1.OptCaretBlinkEnabled;
+    CaretBlinkTime := BCEditor1.OptCaretBlinkTime;
+    CaretVirtual := BCEditor1.OptCaretVirtual;
+    CaretMany := BCEditor1.OptCaretManyAllowed;
+    CaretStopUnfocused := BCEditor1.OptCaretStopUnfocused;
+    CaretPrimitiveColumn := BCEditor1.OptCaretsPrimitiveColumnSelection;
+    CaretTextInverted := ATEditorOptions.CaretTextOverInvertedRect;
+    SaveForceFinalEol := BCEditor1.OptSavingForceFinalEol;
+    SaveTrimSpaces := BCEditor1.OptSavingTrimSpaces;
+    SaveTrimFinalEmptyLines := BCEditor1.OptSavingTrimFinalEmptyLines;
+    CopyLinesIfNoSel := BCEditor1.OptCopyLinesIfNoSel;
+    CutLinesIfNoSel := BCEditor1.OptCutLinesIfNoSel;
+    PasteOverwrite := BCEditor1.OptOverwriteAllowedOnPaste;
+    PasteSpread := BCEditor1.OptPasteMultilineTextSpreadsToCarets;
+    UndoLimit := BCEditor1.OptUndoLimit;
+    UndoGrouped := BCEditor1.OptUndoGrouped;
+    UndoAfterSave := BCEditor1.OptUndoAfterSave;
+    UndoForCaretJump := BCEditor1.OptUndoForCaretJump;
+    FontName := BCEditor1.Font.Name;
+    FontSize := BCEditor1.Font.Size;
+  end;
+end;
+
+procedure TForm1.ApplyEditorOptions;
+begin
+  with FEditorOpts do
+  begin
+    // An ini from a build with a longer enum must not index past the end of
+    // these -- the casts below would not range-check.
+    if (WrapMode < 0) or (WrapMode > Ord(High(TATEditorWrapMode))) then
+      WrapMode := Ord(TATEditorWrapMode.ModeOff);
+    if (NumbersStyle < 0) or (NumbersStyle > Ord(High(TATEditorNumbersStyle))) then
+      NumbersStyle := 0;
+    if (NumbersAlignment < 0) or (NumbersAlignment > Ord(High(TAlignment))) then
+      NumbersAlignment := 0;
+    if (RulerStyle < 0) or (RulerStyle > Ord(High(TATEditorRulerNumeration))) then
+      RulerStyle := 0;
+    if (AutoIndentKind < 0) or (AutoIndentKind > Ord(High(TATEditorAutoIndentKind))) then
+      AutoIndentKind := 0;
+    if (PageSize < 0) or (PageSize > Ord(High(TATEditorPageDownSize))) then
+      PageSize := 0;
+    if (Mouse2ClickAction < 0) or (Mouse2ClickAction > Ord(High(TATEditorDoubleClickAction))) then
+      Mouse2ClickAction := 0;
+    if (MouseMiddleClickAction < 0) or (MouseMiddleClickAction > Ord(High(TATEditorMiddleClickAction))) then
+      MouseMiddleClickAction := 0;
+    if (UnprintedEndSymbol < 0) or (UnprintedEndSymbol > Ord(High(TATEditorUnptintedEolSymbol))) then
+      UnprintedEndSymbol := 0;
+    if TabSize < 1 then TabSize := 1;
+    if TabSize > 32 then TabSize := 32;
+    if IndentSize < -16 then IndentSize := -16;
+    if IndentSize > 32 then IndentSize := 32;
+    if ZebraStep < 2 then ZebraStep := 2;
+    if CaretBlinkTime < 100 then CaretBlinkTime := 100;
+    if UndoLimit < 0 then UndoLimit := 0;
+
+    BCEditor1.OptShowCurLine := ShowCurLine;
+    BCEditor1.OptShowCurLineMinimal := ShowCurLineMinimal;
+    BCEditor1.OptShowCurColumn := ShowCurColumn;
+    BCEditor1.OptLastLineOnTop := LastLineOnTop;
+    BCEditor1.OptShowFullWidthForSelection := ShowFullWidthSel;
+    BCEditor1.OptShowFullWidthForSyntaxHilite := ShowFullWidthHilite;
+    BCEditor1.OptShowIndentLines := ShowIndentLines;
+    BCEditor1.OptZebraActive := ZebraActive;
+    BCEditor1.OptZebraStep := ZebraStep;
+    BCEditor1.OptShowScrollHint := ShowScrollHint;
+    BCEditor1.OptTextHint := TextHint;
+    BCEditor1.OptWrapMode := TATEditorWrapMode(WrapMode);
+    BCEditor1.OptWrapIndented := WrapIndented;
+    BCEditor1.OptGutterVisible := GutterVisible;
+    SetGutterBandVisible(ATEditorOptions.GutterTagNumbers, GutterNumbers);
+    SetGutterBandVisible(ATEditorOptions.GutterTagBookmarks, GutterBookmarks);
+    SetGutterBandVisible(ATEditorOptions.GutterTagFolding, GutterFolding);
+    SetGutterBandVisible(ATEditorOptions.GutterTagLineStates, GutterStates);
+    SetGutterBandVisible(ATEditorOptions.GutterTagSeparator, GutterSeparator);
+    BCEditor1.OptNumbersStyle := TATEditorNumbersStyle(NumbersStyle);
+    BCEditor1.OptNumbersAlignment := TAlignment(NumbersAlignment);
+    BCEditor1.OptNumbersShowFirst := NumbersShowFirst;
+    BCEditor1.OptNumbersShowCarets := NumbersShowCarets;
+    BCEditor1.OptShowGutterCaretBG := GutterCaretBG;
+    BCEditor1.OptRulerVisible := RulerVisible;
+    BCEditor1.OptRulerHeightPercents := RulerHeight;
+    BCEditor1.OptRulerFontSizePercents := RulerFontSize;
+    BCEditor1.OptRulerTopIndentPercents := RulerTopIndent;
+    BCEditor1.OptRulerNumeration := TATEditorRulerNumeration(RulerStyle);
+    BCEditor1.OptMinimapVisible := MinimapVisible;
+    BCEditor1.OptMinimapCharWidth := MinimapCharWidth;
+    BCEditor1.OptMinimapShowSelBorder := MinimapSelBorder;
+    BCEditor1.OptMinimapShowSelAlways := MinimapSelAlways;
+    BCEditor1.OptUnprintedVisible := UnprintedVisible;
+    BCEditor1.OptUnprintedSpaces := UnprintedSpaces;
+    BCEditor1.OptUnprintedSpacesTrailing := UnprintedSpacesTrailing;
+    BCEditor1.OptUnprintedSpacesBothEnds := UnprintedSpacesBothEnds;
+    BCEditor1.OptUnprintedEnds := UnprintedEnds;
+    BCEditor1.OptUnprintedEndsDetails := UnprintedEndsDetails;
+    ATEditorOptions.UnprintedReplaceSpec := UnprintedReplaceSpec;
+    ATEditorOptions.UnprintedEndSymbol := TATEditorUnptintedEolSymbol(UnprintedEndSymbol);
+    ATEditorOptions.UnprintedTabPointerScale := UnprintedTabScale;
+    BCEditor1.OptTabSpaces := TabSpaces;
+    BCEditor1.OptTabSize := TabSize;
+    BCEditor1.OptIndentSize := IndentSize;
+    BCEditor1.OptAutoIndent := AutoIndent;
+    BCEditor1.OptAutoIndentKind := TATEditorAutoIndentKind(AutoIndentKind);
+    BCEditor1.OptKeyTabIndents := TabIndents;
+    BCEditor1.OptKeyBackspaceUnindent := BackspaceUnindent;
+    BCEditor1.OptKeyBackspaceGoesToPrevLine := BackspaceGoesPrev;
+    BCEditor1.OptIndentKeepsAlign := IndentKeepsAlign;
+    BCEditor1.OptOverwriteSel := OverwriteSel;
+    BCEditor1.OptKeyUpDownNavigateWrapped := NavUpDownWrapped;
+    BCEditor1.OptKeyUpDownAllowToEdge := UpDownAllowToEdge;
+    BCEditor1.OptKeyUpDownKeepColumn := UpDownKeepColumn;
+    BCEditor1.OptKeyHomeEndNavigateWrapped := NavHomeEndWrapped;
+    BCEditor1.OptKeyHomeToNonSpace := HomeToNonSpace;
+    BCEditor1.OptKeyEndToNonSpace := EndToNonSpace;
+    BCEditor1.OptKeyPageKeepsRelativePos := PageKeepsRelative;
+    BCEditor1.OptKeyPageUpDownSize := TATEditorPageDownSize(PageSize);
+    BCEditor1.OptKeyLeftRightSwapSel := LeftRightSwapSel;
+    BCEditor1.OptMouseEnableNormalSelection := MouseNormalSel;
+    BCEditor1.OptMouseEnableColumnSelection := MouseColumnSel;
+    BCEditor1.OptMouse2ClickAction := TATEditorDoubleClickAction(Mouse2ClickAction);
+    BCEditor1.OptMouse3ClickSelectsLine := Mouse3ClickSelectsLine;
+    BCEditor1.OptMouse2ClickDragSelectsWords := Mouse2ClickDragSelectsWords;
+    BCEditor1.OptMouseClickNumberSelectsLine := MouseClickNumberSelectsLine;
+    BCEditor1.OptMouseDragDrop := MouseDragDrop;
+    BCEditor1.OptMouseRightClickMovesCaret := MouseRightClickMovesCaret;
+    BCEditor1.OptMouseMiddleClickAction := TATEditorMiddleClickAction(MouseMiddleClickAction);
+    BCEditor1.OptMouseHideCursorOnType := MouseHideCursorOnType;
+    BCEditor1.OptMouseClickOpensURL := MouseClickOpensURL;
+    BCEditor1.OptCaretBlinkEnabled := CaretBlinkEnabled;
+    BCEditor1.OptCaretBlinkTime := CaretBlinkTime;
+    BCEditor1.OptCaretVirtual := CaretVirtual;
+    BCEditor1.OptCaretManyAllowed := CaretMany;
+    BCEditor1.OptCaretStopUnfocused := CaretStopUnfocused;
+    BCEditor1.OptCaretsPrimitiveColumnSelection := CaretPrimitiveColumn;
+    ATEditorOptions.CaretTextOverInvertedRect := CaretTextInverted;
+    BCEditor1.OptSavingForceFinalEol := SaveForceFinalEol;
+    BCEditor1.OptSavingTrimSpaces := SaveTrimSpaces;
+    BCEditor1.OptSavingTrimFinalEmptyLines := SaveTrimFinalEmptyLines;
+    BCEditor1.OptCopyLinesIfNoSel := CopyLinesIfNoSel;
+    BCEditor1.OptCutLinesIfNoSel := CutLinesIfNoSel;
+    BCEditor1.OptOverwriteAllowedOnPaste := PasteOverwrite;
+    BCEditor1.OptPasteMultilineTextSpreadsToCarets := PasteSpread;
+    BCEditor1.OptUndoLimit := UndoLimit;
+    BCEditor1.OptUndoGrouped := UndoGrouped;
+    BCEditor1.OptUndoAfterSave := UndoAfterSave;
+    BCEditor1.OptUndoForCaretJump := UndoForCaretJump;
+    if FontName <> '' then
+      BCEditor1.Font.Name := FontName;
+    if FontSize > 0 then
+      BCEditor1.Font.Size := FontSize;
+  end;
+  BCEditor1.Gutter.Update;
+  BCEditor1.Update;
+end;
+
+procedure TForm1.LoadEditorOptions(ini: TIniFile);
+begin
+  CaptureEditorOptions;
+  with FEditorOpts do
+  begin
+    // A settings.ini from before the Options dialog has no [Editor] section;
+    // its only wrapping key was [MDPad] wordwrap, which maps onto wrapping.
+    if (not ini.ValueExists('Editor', 'wrapmode')) and
+      ini.ReadBool('MDPad', 'wordwrap', false) then
+      WrapMode := Ord(TATEditorWrapMode.ModeOn);
+    ShowCurLine := ini.ReadBool('Editor', 'curline', ShowCurLine);
+    ShowCurLineMinimal := ini.ReadBool('Editor', 'curlineminimal', ShowCurLineMinimal);
+    ShowCurColumn := ini.ReadBool('Editor', 'curcolumn', ShowCurColumn);
+    LastLineOnTop := ini.ReadBool('Editor', 'lastlineontop', LastLineOnTop);
+    ShowFullWidthSel := ini.ReadBool('Editor', 'fullwidthsel', ShowFullWidthSel);
+    ShowFullWidthHilite := ini.ReadBool('Editor', 'fullwidthhilite', ShowFullWidthHilite);
+    ShowIndentLines := ini.ReadBool('Editor', 'indentlines', ShowIndentLines);
+    ZebraActive := ini.ReadBool('Editor', 'zebra', ZebraActive);
+    ShowScrollHint := ini.ReadBool('Editor', 'scrollhint', ShowScrollHint);
+    WrapIndented := ini.ReadBool('Editor', 'wrapindented', WrapIndented);
+    GutterVisible := ini.ReadBool('Editor', 'gutter', GutterVisible);
+    GutterNumbers := ini.ReadBool('Editor', 'gutternumbers', GutterNumbers);
+    GutterBookmarks := ini.ReadBool('Editor', 'gutterbookmarks', GutterBookmarks);
+    GutterFolding := ini.ReadBool('Editor', 'gutterfolding', GutterFolding);
+    GutterStates := ini.ReadBool('Editor', 'gutterstates', GutterStates);
+    GutterSeparator := ini.ReadBool('Editor', 'gutterseparator', GutterSeparator);
+    NumbersShowFirst := ini.ReadBool('Editor', 'numbershowfirst', NumbersShowFirst);
+    NumbersShowCarets := ini.ReadBool('Editor', 'numbershowcarets', NumbersShowCarets);
+    GutterCaretBG := ini.ReadBool('Editor', 'guttercaretbg', GutterCaretBG);
+    RulerVisible := ini.ReadBool('Editor', 'ruler', RulerVisible);
+    MinimapVisible := ini.ReadBool('Editor', 'minimap', MinimapVisible);
+    MinimapSelBorder := ini.ReadBool('Editor', 'minimapselborder', MinimapSelBorder);
+    MinimapSelAlways := ini.ReadBool('Editor', 'minimapselalways', MinimapSelAlways);
+    UnprintedVisible := ini.ReadBool('Editor', 'unprinted', UnprintedVisible);
+    UnprintedSpaces := ini.ReadBool('Editor', 'unprintedspaces', UnprintedSpaces);
+    UnprintedSpacesTrailing := ini.ReadBool('Editor', 'unprintedspacestrailing', UnprintedSpacesTrailing);
+    UnprintedSpacesBothEnds := ini.ReadBool('Editor', 'unprintedspacesbothends', UnprintedSpacesBothEnds);
+    UnprintedEnds := ini.ReadBool('Editor', 'unprintedends', UnprintedEnds);
+    UnprintedEndsDetails := ini.ReadBool('Editor', 'unprintedendsdetails', UnprintedEndsDetails);
+    UnprintedReplaceSpec := ini.ReadBool('Editor', 'unprintedreplace', UnprintedReplaceSpec);
+    TabSpaces := ini.ReadBool('Editor', 'tabspaces', TabSpaces);
+    AutoIndent := ini.ReadBool('Editor', 'autoindent', AutoIndent);
+    TabIndents := ini.ReadBool('Editor', 'tabindents', TabIndents);
+    BackspaceUnindent := ini.ReadBool('Editor', 'backspaceunindent', BackspaceUnindent);
+    BackspaceGoesPrev := ini.ReadBool('Editor', 'backspacegoesprev', BackspaceGoesPrev);
+    IndentKeepsAlign := ini.ReadBool('Editor', 'indentkeepsalign', IndentKeepsAlign);
+    OverwriteSel := ini.ReadBool('Editor', 'overwritesel', OverwriteSel);
+    NavUpDownWrapped := ini.ReadBool('Editor', 'navupdownwrapped', NavUpDownWrapped);
+    UpDownAllowToEdge := ini.ReadBool('Editor', 'updownallowtoedge', UpDownAllowToEdge);
+    UpDownKeepColumn := ini.ReadBool('Editor', 'updownkeepcolumn', UpDownKeepColumn);
+    NavHomeEndWrapped := ini.ReadBool('Editor', 'navhomeendwrapped', NavHomeEndWrapped);
+    HomeToNonSpace := ini.ReadBool('Editor', 'hometononspace', HomeToNonSpace);
+    EndToNonSpace := ini.ReadBool('Editor', 'endtononspace', EndToNonSpace);
+    PageKeepsRelative := ini.ReadBool('Editor', 'pagekeepsrelative', PageKeepsRelative);
+    LeftRightSwapSel := ini.ReadBool('Editor', 'leftrightswapsel', LeftRightSwapSel);
+    MouseNormalSel := ini.ReadBool('Editor', 'mousenormalsel', MouseNormalSel);
+    MouseColumnSel := ini.ReadBool('Editor', 'mousecolumnsel', MouseColumnSel);
+    Mouse3ClickSelectsLine := ini.ReadBool('Editor', 'mouse3clicksline', Mouse3ClickSelectsLine);
+    Mouse2ClickDragSelectsWords := ini.ReadBool('Editor', 'mouse2dragwords', Mouse2ClickDragSelectsWords);
+    MouseClickNumberSelectsLine := ini.ReadBool('Editor', 'mouseclicknumline', MouseClickNumberSelectsLine);
+    MouseDragDrop := ini.ReadBool('Editor', 'mousedragdrop', MouseDragDrop);
+    MouseRightClickMovesCaret := ini.ReadBool('Editor', 'mouserightcaret', MouseRightClickMovesCaret);
+    MouseHideCursorOnType := ini.ReadBool('Editor', 'mousehidecursortype', MouseHideCursorOnType);
+    MouseClickOpensURL := ini.ReadBool('Editor', 'mouseclickopensurl', MouseClickOpensURL);
+    CaretBlinkEnabled := ini.ReadBool('Editor', 'caretblink', CaretBlinkEnabled);
+    CaretVirtual := ini.ReadBool('Editor', 'caretvirtual', CaretVirtual);
+    CaretMany := ini.ReadBool('Editor', 'caretmany', CaretMany);
+    CaretStopUnfocused := ini.ReadBool('Editor', 'caretstopunfocused', CaretStopUnfocused);
+    CaretPrimitiveColumn := ini.ReadBool('Editor', 'caretprimitivecolumn', CaretPrimitiveColumn);
+    CaretTextInverted := ini.ReadBool('Editor', 'carettextinverted', CaretTextInverted);
+    SaveForceFinalEol := ini.ReadBool('Editor', 'savefinaleol', SaveForceFinalEol);
+    SaveTrimSpaces := ini.ReadBool('Editor', 'savetrimspaces', SaveTrimSpaces);
+    SaveTrimFinalEmptyLines := ini.ReadBool('Editor', 'savetrimempty', SaveTrimFinalEmptyLines);
+    CopyLinesIfNoSel := ini.ReadBool('Editor', 'copylinesifnosel', CopyLinesIfNoSel);
+    CutLinesIfNoSel := ini.ReadBool('Editor', 'cutlinesifnosel', CutLinesIfNoSel);
+    PasteOverwrite := ini.ReadBool('Editor', 'pasteoverwrite', PasteOverwrite);
+    PasteSpread := ini.ReadBool('Editor', 'pastespread', PasteSpread);
+    UndoGrouped := ini.ReadBool('Editor', 'undogrouped', UndoGrouped);
+    UndoAfterSave := ini.ReadBool('Editor', 'undoaftersave', UndoAfterSave);
+    UndoForCaretJump := ini.ReadBool('Editor', 'undocaretjump', UndoForCaretJump);
+    ZebraStep := ini.ReadInteger('Editor', 'zebrastep', ZebraStep);
+    NumbersStyle := ini.ReadInteger('Editor', 'numberstyle', NumbersStyle);
+    NumbersAlignment := ini.ReadInteger('Editor', 'numberalign', NumbersAlignment);
+    RulerHeight := ini.ReadInteger('Editor', 'rulerheight', RulerHeight);
+    RulerFontSize := ini.ReadInteger('Editor', 'rulerfontsize', RulerFontSize);
+    RulerTopIndent := ini.ReadInteger('Editor', 'rulertopindent', RulerTopIndent);
+    RulerStyle := ini.ReadInteger('Editor', 'rulerstyle', RulerStyle);
+    MinimapCharWidth := ini.ReadInteger('Editor', 'minimapcharwidth', MinimapCharWidth);
+    UnprintedEndSymbol := ini.ReadInteger('Editor', 'unprintedendsymbol', UnprintedEndSymbol);
+    UnprintedTabScale := ini.ReadInteger('Editor', 'unprintedtabscale', UnprintedTabScale);
+    TabSize := ini.ReadInteger('Editor', 'tabsize', TabSize);
+    IndentSize := ini.ReadInteger('Editor', 'indentsize', IndentSize);
+    AutoIndentKind := ini.ReadInteger('Editor', 'autoindentkind', AutoIndentKind);
+    PageSize := ini.ReadInteger('Editor', 'pagesize', PageSize);
+    Mouse2ClickAction := ini.ReadInteger('Editor', 'mouse2click', Mouse2ClickAction);
+    MouseMiddleClickAction := ini.ReadInteger('Editor', 'mousemiddle', MouseMiddleClickAction);
+    CaretBlinkTime := ini.ReadInteger('Editor', 'caretblinktime', CaretBlinkTime);
+    UndoLimit := ini.ReadInteger('Editor', 'undolimit', UndoLimit);
+    WrapMode := ini.ReadInteger('Editor', 'wrapmode', WrapMode);
+    FontSize := ini.ReadInteger('Editor', 'fontsize', FontSize);
+    TextHint := ini.ReadString('Editor', 'texthint', TextHint);
+    FontName := ini.ReadString('Editor', 'fontname', FontName);
+  end;
+end;
+
+procedure TForm1.SaveEditorOptions(ini: TIniFile);
+begin
+  with FEditorOpts do
+  begin
+    ini.WriteBool('Editor', 'curline', ShowCurLine);
+    ini.WriteBool('Editor', 'curlineminimal', ShowCurLineMinimal);
+    ini.WriteBool('Editor', 'curcolumn', ShowCurColumn);
+    ini.WriteBool('Editor', 'lastlineontop', LastLineOnTop);
+    ini.WriteBool('Editor', 'fullwidthsel', ShowFullWidthSel);
+    ini.WriteBool('Editor', 'fullwidthhilite', ShowFullWidthHilite);
+    ini.WriteBool('Editor', 'indentlines', ShowIndentLines);
+    ini.WriteBool('Editor', 'zebra', ZebraActive);
+    ini.WriteBool('Editor', 'scrollhint', ShowScrollHint);
+    ini.WriteBool('Editor', 'wrapindented', WrapIndented);
+    ini.WriteBool('Editor', 'gutter', GutterVisible);
+    ini.WriteBool('Editor', 'gutternumbers', GutterNumbers);
+    ini.WriteBool('Editor', 'gutterbookmarks', GutterBookmarks);
+    ini.WriteBool('Editor', 'gutterfolding', GutterFolding);
+    ini.WriteBool('Editor', 'gutterstates', GutterStates);
+    ini.WriteBool('Editor', 'gutterseparator', GutterSeparator);
+    ini.WriteBool('Editor', 'numbershowfirst', NumbersShowFirst);
+    ini.WriteBool('Editor', 'numbershowcarets', NumbersShowCarets);
+    ini.WriteBool('Editor', 'guttercaretbg', GutterCaretBG);
+    ini.WriteBool('Editor', 'ruler', RulerVisible);
+    ini.WriteBool('Editor', 'minimap', MinimapVisible);
+    ini.WriteBool('Editor', 'minimapselborder', MinimapSelBorder);
+    ini.WriteBool('Editor', 'minimapselalways', MinimapSelAlways);
+    ini.WriteBool('Editor', 'unprinted', UnprintedVisible);
+    ini.WriteBool('Editor', 'unprintedspaces', UnprintedSpaces);
+    ini.WriteBool('Editor', 'unprintedspacestrailing', UnprintedSpacesTrailing);
+    ini.WriteBool('Editor', 'unprintedspacesbothends', UnprintedSpacesBothEnds);
+    ini.WriteBool('Editor', 'unprintedends', UnprintedEnds);
+    ini.WriteBool('Editor', 'unprintedendsdetails', UnprintedEndsDetails);
+    ini.WriteBool('Editor', 'unprintedreplace', UnprintedReplaceSpec);
+    ini.WriteBool('Editor', 'tabspaces', TabSpaces);
+    ini.WriteBool('Editor', 'autoindent', AutoIndent);
+    ini.WriteBool('Editor', 'tabindents', TabIndents);
+    ini.WriteBool('Editor', 'backspaceunindent', BackspaceUnindent);
+    ini.WriteBool('Editor', 'backspacegoesprev', BackspaceGoesPrev);
+    ini.WriteBool('Editor', 'indentkeepsalign', IndentKeepsAlign);
+    ini.WriteBool('Editor', 'overwritesel', OverwriteSel);
+    ini.WriteBool('Editor', 'navupdownwrapped', NavUpDownWrapped);
+    ini.WriteBool('Editor', 'updownallowtoedge', UpDownAllowToEdge);
+    ini.WriteBool('Editor', 'updownkeepcolumn', UpDownKeepColumn);
+    ini.WriteBool('Editor', 'navhomeendwrapped', NavHomeEndWrapped);
+    ini.WriteBool('Editor', 'hometononspace', HomeToNonSpace);
+    ini.WriteBool('Editor', 'endtononspace', EndToNonSpace);
+    ini.WriteBool('Editor', 'pagekeepsrelative', PageKeepsRelative);
+    ini.WriteBool('Editor', 'leftrightswapsel', LeftRightSwapSel);
+    ini.WriteBool('Editor', 'mousenormalsel', MouseNormalSel);
+    ini.WriteBool('Editor', 'mousecolumnsel', MouseColumnSel);
+    ini.WriteBool('Editor', 'mouse3clicksline', Mouse3ClickSelectsLine);
+    ini.WriteBool('Editor', 'mouse2dragwords', Mouse2ClickDragSelectsWords);
+    ini.WriteBool('Editor', 'mouseclicknumline', MouseClickNumberSelectsLine);
+    ini.WriteBool('Editor', 'mousedragdrop', MouseDragDrop);
+    ini.WriteBool('Editor', 'mouserightcaret', MouseRightClickMovesCaret);
+    ini.WriteBool('Editor', 'mousehidecursortype', MouseHideCursorOnType);
+    ini.WriteBool('Editor', 'mouseclickopensurl', MouseClickOpensURL);
+    ini.WriteBool('Editor', 'caretblink', CaretBlinkEnabled);
+    ini.WriteBool('Editor', 'caretvirtual', CaretVirtual);
+    ini.WriteBool('Editor', 'caretmany', CaretMany);
+    ini.WriteBool('Editor', 'caretstopunfocused', CaretStopUnfocused);
+    ini.WriteBool('Editor', 'caretprimitivecolumn', CaretPrimitiveColumn);
+    ini.WriteBool('Editor', 'carettextinverted', CaretTextInverted);
+    ini.WriteBool('Editor', 'savefinaleol', SaveForceFinalEol);
+    ini.WriteBool('Editor', 'savetrimspaces', SaveTrimSpaces);
+    ini.WriteBool('Editor', 'savetrimempty', SaveTrimFinalEmptyLines);
+    ini.WriteBool('Editor', 'copylinesifnosel', CopyLinesIfNoSel);
+    ini.WriteBool('Editor', 'cutlinesifnosel', CutLinesIfNoSel);
+    ini.WriteBool('Editor', 'pasteoverwrite', PasteOverwrite);
+    ini.WriteBool('Editor', 'pastespread', PasteSpread);
+    ini.WriteBool('Editor', 'undogrouped', UndoGrouped);
+    ini.WriteBool('Editor', 'undoaftersave', UndoAfterSave);
+    ini.WriteBool('Editor', 'undocaretjump', UndoForCaretJump);
+    ini.WriteInteger('Editor', 'zebrastep', ZebraStep);
+    ini.WriteInteger('Editor', 'numberstyle', NumbersStyle);
+    ini.WriteInteger('Editor', 'numberalign', NumbersAlignment);
+    ini.WriteInteger('Editor', 'rulerheight', RulerHeight);
+    ini.WriteInteger('Editor', 'rulerfontsize', RulerFontSize);
+    ini.WriteInteger('Editor', 'rulertopindent', RulerTopIndent);
+    ini.WriteInteger('Editor', 'rulerstyle', RulerStyle);
+    ini.WriteInteger('Editor', 'minimapcharwidth', MinimapCharWidth);
+    ini.WriteInteger('Editor', 'unprintedendsymbol', UnprintedEndSymbol);
+    ini.WriteInteger('Editor', 'unprintedtabscale', UnprintedTabScale);
+    ini.WriteInteger('Editor', 'tabsize', TabSize);
+    ini.WriteInteger('Editor', 'indentsize', IndentSize);
+    ini.WriteInteger('Editor', 'autoindentkind', AutoIndentKind);
+    ini.WriteInteger('Editor', 'pagesize', PageSize);
+    ini.WriteInteger('Editor', 'mouse2click', Mouse2ClickAction);
+    ini.WriteInteger('Editor', 'mousemiddle', MouseMiddleClickAction);
+    ini.WriteInteger('Editor', 'caretblinktime', CaretBlinkTime);
+    ini.WriteInteger('Editor', 'undolimit', UndoLimit);
+    ini.WriteInteger('Editor', 'wrapmode', WrapMode);
+    ini.WriteInteger('Editor', 'fontsize', FontSize);
+    ini.WriteString('Editor', 'texthint', TextHint);
+    ini.WriteString('Editor', 'fontname', FontName);
+  end;
+end;
+
+// The Editor menu's quick toggles show the same state the dialog does, and so
+// does Format > Wordwrap (which had been toggling something else).
+procedure TForm1.UpdateEditorMenuChecks;
+begin
+  if mnuEditorGutter = nil then
+    Exit;
+  mnuEditorGutter.Checked := FEditorOpts.GutterVisible;
+  mnuEditorRuler.Checked := FEditorOpts.RulerVisible;
+  mnuEditorMinimap.Checked := FEditorOpts.MinimapVisible;
+  mnuEditorUnprinted.Checked := FEditorOpts.UnprintedVisible;
+  mnuEditorWrap.Checked := FEditorOpts.WrapMode <> Ord(TATEditorWrapMode.ModeOff);
+  Wordwrap1.Checked := mnuEditorWrap.Checked;
+end;
+
+procedure TForm1.mnuEditorToggleClick(Sender: TObject);
+begin
+  if not (Sender is TMenuItem) then
+    Exit;
+  case TMenuItem(Sender).Tag of
+    0: FEditorOpts.GutterVisible := not FEditorOpts.GutterVisible;
+    1: FEditorOpts.RulerVisible := not FEditorOpts.RulerVisible;
+    2: FEditorOpts.MinimapVisible := not FEditorOpts.MinimapVisible;
+    3: FEditorOpts.UnprintedVisible := not FEditorOpts.UnprintedVisible;
+    4: if FEditorOpts.WrapMode = Ord(TATEditorWrapMode.ModeOff) then
+         FEditorOpts.WrapMode := Ord(TATEditorWrapMode.AtWindowOrMargin)
+       else
+         FEditorOpts.WrapMode := Ord(TATEditorWrapMode.ModeOff);
+  end;
+  ApplyEditorOptions;
+  UpdateEditorMenuChecks;
+  SaveINI;
+end;
+
+function TForm1.BuildPreviewList: TIdCaptionArray;
+begin
+  // What this build can actually show: IE is compiled in on Windows only, and
+  // the JS engines need it.
+  SetLength(Result, 2);
+  Result[0].Id := pvHTML;
+  Result[0].Caption := 'HTML (THtmlViewer)';
+  Result[1].Id := pvMARKDOWN4D;
+  Result[1].Caption := 'Canvas (Markdown4D)';
+  {$IFDEF MSWINDOWS}
+  SetLength(Result, 3);
+  Result[2].Id := pvIE;
+  Result[2].Caption := 'Internet Explorer (ActiveX)';
+  {$ENDIF}
+end;
+
+function TForm1.BuildEngineList: TIdCaptionArray;
+var
+  n: Integer;
+begin
+  n := 0;
+  {$IFDEF MSWINDOWS}
+  // Off Windows the JS engines fall through to the native path, so listing
+  // them would offer a pick that changes nothing.
+  SetLength(Result, 7);
+  Result[0].Id := mdPAGEDOWN;    Result[0].Caption := 'PageDown (JavaScript)';
+  Result[1].Id := mdMARKDOWNJS;  Result[1].Caption := 'Markdown.js (JavaScript)';
+  Result[2].Id := mdMARKED;      Result[2].Caption := 'Marked (JavaScript)';
+  Result[3].Id := mdSHOWDOWN;    Result[3].Caption := 'ShowDown (JavaScript)';
+  Result[4].Id := mdMARKDOWNIT;  Result[4].Caption := 'MarkdownIt (JavaScript)';
+  n := 5;
+  {$ELSE}
+  SetLength(Result, 2);
+  {$ENDIF}
+  Result[n].Id := mdNATIVE;
+  Result[n].Caption := 'Native Markdown (MyWiki)';
+  Result[n + 1].Id := mdMARKDOWN4D;
+  Result[n + 1].Caption := 'Native GFM (Markdown4D)';
+end;
+
+// The tabbed Options window. The dialog edits the records; the direction of
+// travel is one way here: everything is applied (and saved) only after OK.
+procedure TForm1.mnuOptionsClick(Sender: TObject);
+var
+  App: TMdAppOptions;
+  oldPreview, oldEngine, oldZoom, oldMRU: Integer;
+  oldTheme: TAppTheme;
+  oldSyntax, oldCSS, oldSync, oldRemote: Boolean;
+begin
+  App.Theme := Ord(SelectedTheme);
+  App.SyntaxEnabled := mnuSyntax.Checked;
+  App.CSSEnabled := mnuCSS.Checked;
+  App.SyncScroll := Synceditwithpreview1.Checked;
+  App.RemoteImages := Loadremoteimages1.Checked;
+  App.Preview := SelectedPreview;
+  App.Engine := SelectedEngine;
+  App.Zoom := TrackBar1.Position;
+  App.MRULimit := FMRULimit;
+
+  if not ShowOptionsDialog(FEditorOpts, App, BuildPreviewList, BuildEngineList) then
+    Exit;
+
+  oldPreview := SelectedPreview;
+  oldEngine := SelectedEngine;
+  oldZoom := TrackBar1.Position;
+  oldMRU := FMRULimit;
+  oldTheme := SelectedTheme;
+  oldSyntax := mnuSyntax.Checked;
+  oldCSS := mnuCSS.Checked;
+  oldSync := Synceditwithpreview1.Checked;
+  oldRemote := Loadremoteimages1.Checked;
+
+  ApplyEditorOptions;
+  UpdateEditorMenuChecks;
+
+  if App.MRULimit <> oldMRU then
+  begin
+    FMRULimit := App.MRULimit;
+    while FMRU.Count > FMRULimit do
+      FMRU.Delete(FMRU.Count - 1);
+    RebuildRecentMenu;
+  end;
+
+  mnuSyntax.Checked := App.SyntaxEnabled;
+  SelectedTheme := TAppTheme(App.Theme);
+  UpdateThemeInMenu;
+  mnuCSS.Checked := App.CSSEnabled;
+
+  SelectedPreview := App.Preview;
+  SelectedEngine := App.Engine;
+  UpdatePreviewInMenu;
+  UpdateEngineInMenu;
+
+  if App.Zoom <> oldZoom then
+  begin
+    TrackBar1.Position := App.Zoom;
+    TrackBar1Change(Self);
+  end;
+
+  if App.SyncScroll <> oldSync then
+  begin
+    Synceditwithpreview1.Checked := App.SyncScroll;
+    tmrScrollSyncer.Enabled := App.SyncScroll;
+    if App.SyncScroll then
+    begin
+      // Same as Synceditwithpreview1Click: follow the editor at once instead
+      // of waiting for the next tick.
+      InvalidateScrollSync;
+      SyncEditorToPreview;
+      InvalidateScrollSync;
+    end;
+  end;
+
+  if App.RemoteImages <> oldRemote then
+  begin
+    Loadremoteimages1.Checked := App.RemoteImages;
+    ApplyRemoteImagesSetting(True);
+  end;
+
+  if mnuSyntax.Checked <> oldSyntax then
+    ApplySyntaxEnabled;
+
+  // The theme repaints the sheet the preview is drawn into, so it goes before
+  // the engine is reloaded (ApplyTheme(True) re-renders with the old engine).
+  if (SelectedTheme <> oldTheme) or (mnuCSS.Checked <> oldCSS) then
+    ApplyTheme(True);
+
+  if (SelectedPreview <> oldPreview) or (SelectedEngine <> oldEngine) then
+  begin
+    LoadEngine;
+    UpdateResult;
+    ApplyViewMode;
+  end;
+
+  SaveINI;
 end;
 
 // The lexer the editor should be highlighting with: none when the user turned
@@ -3731,37 +4588,16 @@ begin
 end;
 
 procedure TForm1.Open1Click(Sender: TObject);
-var
-  confirm: integer;
-  canweopen: boolean;
 begin
-  if textBuffer <> BCEditor1.Text then
-  begin
-    canweopen :=false;
-    confirm := MessageDlg('Your document has been modified'#13'Do you want to save those changes?',mtConfirmation,[mbYes,mbNo,mbCancel],0);
-    if confirm = mrYes then
-    begin
-      Save1Click(sender);
-      canweopen:=true;
-    end
-    else if confirm = mrNo then
-      //let's open a new file
-      canweopen:=true;
-//    else if confirm = mrCancel then
-      //let's continue
-  end
-  else
-  begin
-    canweopen:=true;
-  end;
-
-  if canweopen then
+  if not CanOpenAnotherFile then
+    Exit;
   with OpenDialog1 do
   begin
     Filter:='MarkDown files|*.md;*.mkd;*.markdown|*.*|*.*';
     if Execute then
     begin
       OpenMDFile(filename);
+      AddToMRU(filename);
     end;
   end;
 end;
@@ -4041,6 +4877,7 @@ begin
     ReadingFromExplorer:=False;
     Resultonly1Click(Form1);
     OpenMDFile(ParamStr(1));
+    AddToMRU(ParamStr(1));
   end
   else if ReloadingEngine then
   begin
@@ -4074,8 +4911,10 @@ end;}
 
 procedure TForm1.Wordwrap1Click(Sender: TObject);
 begin
-  Wordwrap1.Checked:=not Wordwrap1.Checked;
-  BCEditor1.OptWrapIndented := Wordwrap1.Checked;
+  // Same switch as Editor > Word wrap and the Options dialog: the menu used to
+  // toggle OptWrapIndented (which only affects wrapped lines), so with wrapping
+  // off by default it looked like it did nothing.
+  mnuEditorToggleClick(mnuEditorWrap);
 end;
 
 procedure TForm1.Loadremoteimages1Click(Sender: TObject);
