@@ -102,6 +102,12 @@ uses
   // engine/HTML plumbing above.
   Markdown4D,
   Markdown4D.Defines,
+  // The outline of a Markdown4D-parsed document (captions, levels, anchors and
+  // source lines) and the pipeline that renders its HTML with those anchors
+  // written as ids, so the table of contents and the preview agree.
+  Markdown4D.Toc,
+  Markdown4D.Pipeline,
+  Markdown4D.Extensions.Interfaces,
   // Where a scroll offset keeps a source line in view (the same helper the
   // library's own editors use to follow an editor without yanking the preview).
   Markdown4D.Editor.PreviewScroll,
@@ -314,6 +320,12 @@ type
     FSyncAnchorLine: array of Integer; // heading source lines, ascending
     FSyncAnchorY: array of Integer; // their Y in the HTML preview
     FHeaders: TObjectList<THeaderItem>; // headings of the HTML currently previewed
+    // The canvas viewer parses only once it has a viewport width, which it is
+    // given *after* the render that switched the backend to it: the outline read
+    // at that moment is empty, so the tick adopts it again as soon as the viewer
+    // has laid the document out. LayoutCount moves on every relayout (resize, an
+    // arriving image), which is exactly when the outline can have grown.
+    FCanvasLayoutCount: Integer;
     { Private declarations }
     function UsingJsEngine: Boolean;
     function UsingIE: Boolean;
@@ -328,6 +340,10 @@ type
     procedure InvalidateScrollSync;
     // The HTML preview's anchor points (headings) and the lookups over them.
     procedure AdoptHeaders(AList: TObjectList<THeaderItem>);
+    // The canvas backend has no worker to report headings: it parses the
+    // document itself, so its own outline is where the heading list and the
+    // table of contents come from there.
+    procedure AdoptCanvasOutline;
     procedure InvalidateHtmlAnchors;
     procedure EnsureHtmlAnchors;
     procedure BuildHtmlAnchors;
@@ -511,6 +527,66 @@ begin
     end;
 end;
 
+// MDPad's own Markdown4D pipeline. Not the one TMarkdown.ToUnsafeHtml shares:
+// the shared pipelines leave the headings unnamed (the conformance corpora
+// compare their output byte for byte) while a page wants its headings nameable.
+// HeadingAnchors writes the anchor TMarkdownToc names each heading by as the id
+// of its element, so a #link, an outline entry and the element they stand for
+// all agree. Raw HTML is kept (UnsafeHtml) and the GFM tag filter still runs.
+//
+// UnsafeHtml (not ToHtml) on purpose: it keeps raw HTML in the document, which
+// is what the other engines do (MyWiki; the JS ones on Windows) and what the
+// Markdown4D canvas renders (`HtmlBlock` is laid out, see
+// Markdown4D.Layout.Engine). ToHtml would instead drop every raw HTML block, so
+// a document like markdowntest.md (mostly raw HTML) would lose most of its
+// content.
+function Md4dPipeline: IMarkdownPipeline;
+begin
+  Result := TMarkdownPipeline.Create.UseCommonMark.UseGfm.UnsafeHtml.UnsafeLinks.HeadingAnchors.Build;
+end;
+
+// Takes the heading list the table of contents and the HTML anchors work from
+// off a Markdown4D outline, in reading order. The outline counts source lines
+// from 1, the way its parser does; the editor, the tree ranges and the scroll
+// maps count from 0, so the line is the one before.
+function HeadersFromOutline(const Outline: IMarkdownToc): TObjectList<THeaderItem>;
+var
+  Headers: TObjectList<THeaderItem>;
+
+  procedure AddEntry(const Entry: IMarkdownTocEntry);
+  var
+    Item: THeaderItem;
+    Index: Integer;
+  begin
+    Item := THeaderItem.Create;
+    Item.Caption := Entry.Caption;
+    Item.Id := Entry.Anchor;
+    Item.Level := Entry.Level;
+    Item.Line := Entry.SourceLine - 1;
+    Headers.Add(Item);
+
+    for Index := 0 to Entry.ChildCount - 1 do
+      AddEntry(Entry.Children[Index]);
+  end;
+
+var
+  Index: Integer;
+begin
+  Result := nil;
+  if Outline = nil then
+    Exit;
+
+  Headers := TObjectList<THeaderItem>.Create(True);
+  try
+    for Index := 0 to Outline.EntryCount - 1 do
+      AddEntry(Outline.Entries[Index]);
+    Result := Headers;
+  except
+    Headers.Free;
+    raise;
+  end;
+end;
+
 { TConversionThread }
 
 procedure TConversionThread.SyncUpdateUI;
@@ -544,24 +620,21 @@ procedure TConversionThread.Execute;
 var
   md2: TMarkdownConverter;
   hi, nh: THeaderItem;
+  Pipeline: IMarkdownPipeline;
 begin
   try
     if FEngine = mdMARKDOWN4D then
     begin
       // Markdown4D renders markdown -> HTML in process: its Core is plain
-      // Pascal and the shared pipeline cache is monitor-guarded, so a worker
-      // thread is fine. No header list here (the renderer hands none over), so
-      // the preview's anchors and the table of contents stay empty for it.
+      // Pascal, so a worker thread is fine.
       //
-      // UnsafeHtml (not ToHtml) on purpose: it keeps raw HTML in the document,
-      // which is what the other engines do (MyWiki; the JS ones on Windows) and
-      // what the Markdown4D canvas renders (`HtmlBlock` is laid out, see
-      // Markdown4D.Layout.Engine). The GFM tag filter is still applied by the
-      // pipeline, so <script>/<style>/<iframe>/... are escaped either way — the
-      // same list MyWiki escapes. ToHtml would instead drop every raw HTML
-      // block, so a document like markdowntest.md (mostly raw HTML) would lose
-      // most of its content.
-      FHtmlResult := TMarkdown.ToUnsafeHtml(FMarkdown, TMarkdownDialect.Gfm);
+      // A pipeline of our own (Md4dPipeline): the shared one leaves the headings
+      // unnamed, and the preview wants to be able to send the reader to one.
+      Pipeline := Md4dPipeline;
+      FHtmlResult := Pipeline.ToHtml(FMarkdown);
+      // The renderer hands no outline over, so the same document is parsed once
+      // more for it: these are the headings of the HTML just rendered.
+      FHeaders := HeadersFromOutline(TMarkdownToc.FromDocument(Pipeline.Parse(FMarkdown)));
     end
     else
     begin
@@ -1526,6 +1599,10 @@ begin
   if UsingMarkdown4D then
   begin
     PreviewMd4D.Text := BCEditor1.Text;
+    // SetText laid the document out again, so the viewer's outline describes
+    // what is on screen now: that is where the table of contents comes from
+    // here (there is no worker on this path).
+    AdoptCanvasOutline;
     // Laying the document out again parks the viewer at the top, and it also
     // moved every line: put the view back where the editor is, at once, so the
     // preview does not jump on every keystroke.
@@ -1669,9 +1746,11 @@ end;
 function TForm1.PreviewHtmlBody: string;
 begin
   if UsingMarkdown4D then
-    // Unsafe (raw HTML kept), so the exported page matches what the canvas
-    // draws: the layout engine lays out HtmlBlock nodes instead of hiding them.
-    Result := TMarkdown.ToUnsafeHtml(BCEditor1.Text, TMarkdownDialect.Gfm)
+    // The same pipeline the preview renders with, heading anchors included, so
+    // an exported page is the page that was on screen (and its in-page links
+    // resolve). Unsafe (raw HTML kept) because the canvas lays HtmlBlock nodes
+    // out instead of hiding them.
+    Result := Md4dPipeline.ToHtml(BCEditor1.Text)
   else
     Result := LastPreviewBody;
 end;
@@ -1793,6 +1872,7 @@ begin
   if UsingMarkdown4D then
   begin
     PreviewMd4D.Text := DefaultText;
+    AdoptCanvasOutline;
     InvalidateScrollSync;
     Exit;
   end;
@@ -2221,6 +2301,12 @@ end;
 // line map, is driven from the headings of the HTML it has rendered.
 procedure TForm1.tmrScrollSyncerTimer(Sender: TObject);
 begin
+  // A backend switch renders into a canvas that has no width yet, so the outline
+  // it could read was empty; the layout happens once it is shown. Adopt it again
+  // when the layout has moved on, or the tree would stay empty until an edit.
+  if UsingMarkdown4D and (PreviewMd4D.LayoutCount <> FCanvasLayoutCount) then
+    AdoptCanvasOutline;
+
   if not ((Synceditwithpreview1.Checked) and (BCEditor1.Visible)
   and (ActivePreview.Visible)) then
     Exit;
@@ -2394,6 +2480,20 @@ begin
   FreeAndNil(FHeaders);
   FHeaders := AList;
   InvalidateHtmlAnchors;
+end;
+
+// The canvas backend parses the document itself, so its outline -- not the
+// worker -- is where the heading list and the table of contents come from. The
+// HTML anchor table is left alone: the canvas scroll sync maps a source line
+// straight to an offset and never reads it.
+procedure TForm1.AdoptCanvasOutline;
+begin
+  // Which layout this table came from: the viewer lays the document out lazily
+  // (no viewport width, no document), so the tick has to know whether the
+  // outline it just read is the one the layout built.
+  FCanvasLayoutCount := PreviewMd4D.LayoutCount;
+  AdoptHeaders(HeadersFromOutline(PreviewMd4D.Toc));
+  UpdateTOC;
 end;
 
 procedure TForm1.InvalidateHtmlAnchors;
