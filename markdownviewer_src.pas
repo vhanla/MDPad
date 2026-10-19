@@ -203,6 +203,7 @@ type
     PreviewHtml1: TMenuItem;
     PreviewMarkdown4D1: TMenuItem;
     PreviewIE1: TMenuItem;
+    Loadremoteimages1: TMenuItem;
     tmrScrollSyncer: TTimer;
     Synceditwithpreview1: TMenuItem;
     Engines1: TMenuItem;
@@ -276,6 +277,7 @@ type
     procedure mnuSyntaxClick(Sender: TObject);
     procedure mnuThemeClick(Sender: TObject);
     procedure mnuCSSClick(Sender: TObject);
+    procedure Loadremoteimages1Click(Sender: TObject);
     procedure BCEditor1CaretChanged(Sender: TObject);
     procedure EditorPopupClick(Sender: TObject);
     procedure PreviewHotSpotClick(Sender: TObject; const SRC: ThtString; var Handled: Boolean);
@@ -294,6 +296,12 @@ type
     function UsingMarkdown4D: Boolean;
     function ActivePreview: TWinControl;
     function PreviewHtmlBody: string;
+    // Images the document names relative to itself have to resolve next to the
+    // document, not relative to wherever MDPad was started from.
+    procedure ApplyPreviewBaseFolder;
+    // Mirrors the "Load remote images" menu item into the canvas viewer and
+    // makes its images change accordingly.
+    procedure ApplyRemoteImagesSetting(Reload: Boolean);
     procedure ApplyViewMode;
     procedure UpdateCaretStatus;
     procedure PrintHtmlViewer;
@@ -1421,6 +1429,9 @@ begin
   and not WebBrowser1.Visible then
   exit;}
 
+  // The preview resolves <img src> against the document it came from.
+  ApplyPreviewBaseFolder;
+
   {$IFDEF MSWINDOWS}
   // with a javascript engine we only update the text in the loaded engine
   if UsingIE then
@@ -1515,6 +1526,7 @@ begin
       ini.WriteBool('MDPad', 'syntaxenabled', mnuSyntax.Checked);
       ini.WriteBool('MDPad', 'themeenabled', mnuTheme.Checked);
       ini.WriteBool('MDPad', 'cssenabled', mnuCSS.Checked);
+      ini.WriteBool('MDPad', 'remoteimages', Loadremoteimages1.Checked);
     finally
       ini.Free;
     end;
@@ -1571,6 +1583,33 @@ begin
     Result := TMarkdown.ToUnsafeHtml(BCEditor1.Text, TMarkdownDialect.Gfm)
   else
     Result := LastPreviewBody;
+end;
+
+// A document that names an image relative to itself expects it next to the
+// document, not next to the MDPad binary or wherever the process was started
+// from. Each preview takes the folder its own way: THtmlViewer through Base,
+// the canvas viewer through the base URL of its image settings (which also
+// drops the images that were resolved against the previous one).
+procedure TForm1.ApplyPreviewBaseFolder;
+var
+  Folder: string;
+begin
+  Folder := ExtractFileDir(CurrentFile);
+  PreviewHtml.Base := Folder;
+  PreviewMd4D.Images.BaseUrl := Folder;
+end;
+
+// Remote images are the one thing a document can have the preview fetch from
+// the network (the HTML preview never does). The canvas viewer has a switch
+// for them, so MDPad exposes it; Reload is passed as False when the setting is
+// only being restored at startup and there is no document on screen to refresh.
+procedure TForm1.ApplyRemoteImagesSetting(Reload: Boolean);
+begin
+  PreviewMd4D.Images.AllowRemote := Loadremoteimages1.Checked;
+  if Reload then
+    // Images the old setting refused, or loaded, only change when the document
+    // asks for them again.
+    PreviewMd4D.ReloadImages;
 end;
 
 // Re-applies the checked view mode (editor/result/both) to the active
@@ -1730,6 +1769,9 @@ begin
       mnuSyntax.Checked := ini.ReadBool('MDPad', 'syntaxenabled', false);
       mnuTheme.Checked := ini.ReadBool('MDPad', 'themeenabled', false);
       mnuCSS.Checked := ini.ReadBool('MDPad', 'cssenabled', false);
+
+      Loadremoteimages1.Checked := ini.ReadBool('MDPad', 'remoteimages', true);
+      ApplyRemoteImagesSetting(False);
 
       UpdateEngineInMenu;
       UpdatePreviewInMenu;
@@ -2419,6 +2461,12 @@ procedure TForm1.Wordwrap1Click(Sender: TObject);
 begin
   Wordwrap1.Checked:=not Wordwrap1.Checked;
   BCEditor1.OptWrapIndented := Wordwrap1.Checked;
+end;
+
+procedure TForm1.Loadremoteimages1Click(Sender: TObject);
+begin
+  Loadremoteimages1.Checked := not Loadremoteimages1.Checked;
+  ApplyRemoteImagesSetting(True);
 end;
 
 end.

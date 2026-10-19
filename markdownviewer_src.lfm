@@ -2037,6 +2037,14 @@ object Form1: TForm1
         Caption = 'Preview: &Internet Explorer'
         OnClick = TogglePreview
       end
+      object N13: TMenuItem
+        Caption = '-'
+      end
+      object Loadremoteimages1: TMenuItem
+        Caption = 'Load &remote images (canvas preview)'
+        Checked = True
+        OnClick = Loadremoteimages1Click
+      end
     end
     object Engines1: TMenuItem
       Caption = '&Engines'
