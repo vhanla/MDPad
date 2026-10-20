@@ -2050,6 +2050,16 @@ object Form1: TForm1
         Caption = '&Word wrap'
         OnClick = mnuEditorToggleClick
       end
+      object mnuEditorFormatBar: TMenuItem
+        Tag = 5
+        Caption = 'Formatting &bar'
+        OnClick = mnuEditorToggleClick
+      end
+      object mnuEditorSmartEnter: TMenuItem
+        Tag = 6
+        Caption = '&Continue lists on Enter'
+        OnClick = mnuEditorToggleClick
+      end
       object mnuEditorSep2: TMenuItem
         Caption = '-'
       end

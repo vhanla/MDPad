@@ -131,6 +131,11 @@ type
     UndoGrouped: Boolean;
     UndoAfterSave: Boolean;
     UndoForCaretJump: Boolean;
+    // Markdown editing. These are not ATSynEdit properties: the format bar is
+    // our own panel over the editor and Smart Enter is a key handler, so they
+    // are kept here only to be persisted and shown in the dialog.
+    ShowFormatBar: Boolean;
+    SmartEnter: Boolean;
     // Font
     FontName: string;
     FontSize: Integer;
@@ -618,6 +623,9 @@ begin
   AddCheck(Page, Y, 'Load remote images (canvas preview)', @A.RemoteImages);
   AddHeader(Page, Y, 'Editor font');
   AddFontRow(Page, Y);
+  AddHeader(Page, Y, 'Markdown editing');
+  AddCheck(Page, Y, 'Show the formatting bar above the editor', @E.ShowFormatBar);
+  AddCheck(Page, Y, 'Continue lists and quotes on Enter', @E.SmartEnter);
   AddHeader(Page, Y, 'Recent files');
   AddSpin(Page, Y, 'Entries kept in File > Open recent', @A.MRULimit, 1, 30);
 

@@ -77,7 +77,7 @@ interface
 uses
   SysUtils, Variants, Classes, Graphics,
   Controls, Forms, Dialogs, StdCtrls,
-  Menus, ExtCtrls, ComCtrls,
+  Menus, ExtCtrls, ComCtrls, Buttons, LCLType,
   {$IFDEF MSWINDOWS}
   Windows, Messages, ActiveXContainer, MSHTML_4_0_TLB, SHDocVw_1_1_TLB,
   {$ENDIF}
@@ -90,7 +90,7 @@ uses
     ATSynEdit_Bookmarks,
     ATSynEdit_Export_HTML,
     ATSynEdit_Globals,
-  mdoptions, IniFiles,
+  mdoptions, mdformat, mddialogs, IniFiles,
   ec_SyntAnal,
   ec_proc_lexer,
   HtmlView, HtmlGlobals,
@@ -189,6 +189,14 @@ type
   end;
   TThemeOverrides = array of TThemeOverride;
 
+// The editor's formatting commands. One enum feeds the context menu items, the
+// format bar buttons and the keyboard, so the three cannot drift apart (the
+// Tag of a menu item and of a speed button is the value).
+type
+  TMdCommand = (mcBold, mcItalic, mcStrike, mcCode, mcCodeBlock,
+    mcHeading, mcQuote, mcList, mcOrdered, mcTask,
+    mcLink, mcImage, mcTable, mcRule, mcCompleteWord);
+
   { TForm1 }
 
   TForm1 = class(TForm)
@@ -276,6 +284,8 @@ type
     mnuEditorMinimap: TMenuItem;
     mnuEditorUnprinted: TMenuItem;
     mnuEditorWrap: TMenuItem;
+    mnuEditorFormatBar: TMenuItem;
+    mnuEditorSmartEnter: TMenuItem;
     mnuEditorSep2: TMenuItem;
     mnuEditorFont: TMenuItem;
     mnuPrefOptions: TMenuItem;
@@ -372,6 +382,28 @@ type
     // place that writes it into BCEditor1 -- so the quick toggles in the Editor
     // menu, the dialog and a hand edited settings.ini cannot disagree.
     FEditorOpts: TEditorOptions;
+
+    // Markdown inline editing (mdformat.pas for the text engine, mddialogs.pas
+    // for link/image/table). The format bar is the visible half of the same
+    // commands the context menu and the shortcuts run; it is hidden by default
+    // (FEditorOpts.ShowFormatBar) so it never takes room on its own.
+    FFormatBar: TPanel;
+    FFormatButtons: array of TSpeedButton;
+    // Word completion state: the document's words, the typed prefix, and the
+    // candidate the editor currently holds, so Ctrl+Space again cycles past it
+    // instead of starting over.
+    FComplWords: TMdStringArray;
+    FComplPrefix: UnicodeString;
+    FComplLast: UnicodeString;
+    FComplStart: Integer;
+    FComplCaret: Integer;
+    FComplIndex: Integer;
+    FComplActive: Boolean;
+    // The image dialog's "copy into assets/" answer, remembered for the session.
+    FImageCopyToAssets: Boolean;
+    // Whether ApplyChromeColors painted the app dark (the dialogs and the
+    // canvas ask before they pick their own palette).
+    FThemeDark: Boolean;
 
     FCurrentRequestID: Int64; // A unique, increment ID for each conversion request
     FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
@@ -474,7 +506,26 @@ type
     // sorts the alLeft controls by. The view-mode handlers own the widths,
     // visibility and aligns; this only hands the pass the order.
     procedure ArrangePanes;
+
+    // Markdown editing helpers. Every command changes the document through
+    // ApplyMdEdit, which replaces one range in one undo step and restores the
+    // selection the engine asked for.
+    function EditorSelection(out AStart, AEnd: Integer): Boolean;
+    procedure ApplyMdEdit(const AEdit: TMdEdit);
+    procedure MdExecute(ACommand: TMdCommand);
+    procedure MdCommandClick(Sender: TObject);
+    procedure MdInsertLinkCommand;
+    procedure MdInsertImageCommand;
+    procedure MdInsertTableCommand;
+    procedure MdCompleteWord;
+    function AddMdMenuItem(AParent: TMenuItem; const ACaption: string;
+      ACommand: TMdCommand; AShortCut: TShortCut): TMenuItem;
+    procedure BuildFormatBar;
+    procedure ApplyFormatBarTheme;
+    function ThemeIsDark: Boolean;
+
     procedure UpdateCaretStatus;
+
     procedure PrintHtmlViewer;
     procedure PrintMarkdown4D;
     procedure PerformConversion;
@@ -1847,7 +1898,7 @@ procedure TForm1.FormCreate(Sender: TObject);
 var
   feditor: string;
   st: TStringStream;
-  mi: TMenuItem;
+  mi, Sub: TMenuItem;
 begin
   Application.OnActivate:=OnFocus;
   Caption := 'MDPad';
@@ -1898,9 +1949,51 @@ begin
   mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Copy'; mi.Tag := cCommand_ClipboardCopy; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
   mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Paste'; mi.Tag := cCommand_ClipboardPaste; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
   mi := TMenuItem.Create(EditorPopup); mi.Caption := '&Delete'; mi.Tag := cCommand_TextDeleteSelection; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
-  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; EditorPopup.Items.Add(mi);
   mi := TMenuItem.Create(EditorPopup); mi.Caption := 'Select &All'; mi.Tag := cCommand_SelectAll; mi.OnClick := EditorPopupClick; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; EditorPopup.Items.Add(mi);
+
+  // Markdown formatting: the discoverable half of the shortcuts (the commands
+  // themselves are MdExecute; the keys are in BCEditor1KeyDown). The menu shows
+  // the shortcut, but the editor consumes the key first, so a command can never
+  // run twice.
+  Sub := TMenuItem.Create(EditorPopup);
+  Sub.Caption := 'F&ormat';
+  EditorPopup.Items.Add(Sub);
+  AddMdMenuItem(Sub, '&Bold', mcBold, ShortCut(Ord('B'), [ssCtrl]));
+  AddMdMenuItem(Sub, '&Italic', mcItalic, ShortCut(Ord('I'), [ssCtrl]));
+  AddMdMenuItem(Sub, '&Strikethrough', mcStrike, ShortCut(Ord('X'), [ssCtrl, ssShift]));
+  AddMdMenuItem(Sub, 'Inline &code', mcCode, ShortCut(VK_OEM_3, [ssCtrl]));
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; Sub.Add(mi);
+  AddMdMenuItem(Sub, '&Heading (cycle)', mcHeading, ShortCut(Ord('H'), [ssCtrl, ssShift]));
+  AddMdMenuItem(Sub, 'Code &block', mcCodeBlock, ShortCut(Ord('K'), [ssCtrl, ssShift]));
+  AddMdMenuItem(Sub, '&Quote', mcQuote, ShortCut(Ord('Q'), [ssCtrl, ssShift]));
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; Sub.Add(mi);
+  AddMdMenuItem(Sub, '&Bullet list', mcList, ShortCut(Ord('U'), [ssCtrl, ssShift]));
+  AddMdMenuItem(Sub, '&Numbered list', mcOrdered, ShortCut(Ord('O'), [ssCtrl, ssShift]));
+  AddMdMenuItem(Sub, '&Task item', mcTask, ShortCut(Ord('T'), [ssCtrl, ssShift]));
+
+  Sub := TMenuItem.Create(EditorPopup);
+  Sub.Caption := '&Insert';
+  EditorPopup.Items.Add(Sub);
+  AddMdMenuItem(Sub, '&Link...', mcLink, ShortCut(Ord('K'), [ssCtrl]));
+  AddMdMenuItem(Sub, '&Image...', mcImage, ShortCut(Ord('I'), [ssCtrl, ssShift]));
+  AddMdMenuItem(Sub, '&Table...', mcTable, 0);
+  AddMdMenuItem(Sub, '&Horizontal rule', mcRule, 0);
+
+  mi := TMenuItem.Create(EditorPopup); mi.Caption := '-'; EditorPopup.Items.Add(mi);
+  mi := TMenuItem.Create(EditorPopup);
+  mi.Caption := 'Complete &word';
+  mi.Tag := Ord(mcCompleteWord);
+  mi.OnClick := MdCommandClick;
+  mi.ShortCut := ShortCut(VK_SPACE, [ssCtrl]);
+  EditorPopup.Items.Add(mi);
+
   BCEditor1.PopupMenu := EditorPopup;
+
+  // The format bar, hidden until the saved option says otherwise (ApplyEditorOptions
+  // runs right after LoadINI and shows it). Built before that, so the bar can take
+  // its place in the align pass with the first paint.
+  BuildFormatBar;
 
   // THtmlViewer preview, default on every platform (no JavaScript needed)
   PreviewHtml := THtmlViewer.Create(Self);
@@ -1980,6 +2073,9 @@ begin
   // Recent files are loaded by LoadINI, which also builds the submenu.
   FMRU := TStringList.Create;
   FMRULimit := 10;
+  // A settings.ini without the key keeps this, the sensible default: a list
+  // item continues itself when Enter is pressed.
+  FEditorOpts.SmartEnter := True;
 
   LoadINI;
 
@@ -3288,6 +3384,10 @@ begin
     if FontSize > 0 then
       BCEditor1.Font.Size := FontSize;
   end;
+  // ShowFormatBar is the only option that is not an ATSynEdit property: it is
+  // the visibility of the bar itself (built in FormCreate).
+  if Assigned(FFormatBar) then
+    FFormatBar.Visible := FEditorOpts.ShowFormatBar;
   BCEditor1.Gutter.Update;
   BCEditor1.Update;
 end;
@@ -3372,6 +3472,8 @@ begin
     UndoGrouped := ini.ReadBool('Editor', 'undogrouped', UndoGrouped);
     UndoAfterSave := ini.ReadBool('Editor', 'undoaftersave', UndoAfterSave);
     UndoForCaretJump := ini.ReadBool('Editor', 'undocaretjump', UndoForCaretJump);
+    ShowFormatBar := ini.ReadBool('Editor', 'formatbar', ShowFormatBar);
+    SmartEnter := ini.ReadBool('Editor', 'smartenter', SmartEnter);
     ZebraStep := ini.ReadInteger('Editor', 'zebrastep', ZebraStep);
     NumbersStyle := ini.ReadInteger('Editor', 'numberstyle', NumbersStyle);
     NumbersAlignment := ini.ReadInteger('Editor', 'numberalign', NumbersAlignment);
@@ -3471,6 +3573,8 @@ begin
     ini.WriteBool('Editor', 'undogrouped', UndoGrouped);
     ini.WriteBool('Editor', 'undoaftersave', UndoAfterSave);
     ini.WriteBool('Editor', 'undocaretjump', UndoForCaretJump);
+    ini.WriteBool('Editor', 'formatbar', ShowFormatBar);
+    ini.WriteBool('Editor', 'smartenter', SmartEnter);
     ini.WriteInteger('Editor', 'zebrastep', ZebraStep);
     ini.WriteInteger('Editor', 'numberstyle', NumbersStyle);
     ini.WriteInteger('Editor', 'numberalign', NumbersAlignment);
@@ -3508,7 +3612,388 @@ begin
   mnuEditorUnprinted.Checked := FEditorOpts.UnprintedVisible;
   mnuEditorWrap.Checked := FEditorOpts.WrapMode <> Ord(TATEditorWrapMode.ModeOff);
   Wordwrap1.Checked := mnuEditorWrap.Checked;
+  mnuEditorFormatBar.Checked := FEditorOpts.ShowFormatBar;
+  mnuEditorSmartEnter.Checked := FEditorOpts.SmartEnter;
 end;
+
+// ---------------------------------------------------------------------------
+// Markdown editing helpers
+// ---------------------------------------------------------------------------
+
+function TForm1.ThemeIsDark: Boolean;
+begin
+  Result := FThemeDark;
+end;
+
+// The selection as offsets into the whole text, which is the unit the engine
+// and CaretPosToOffset/OffsetToCaretPos speak.
+function TForm1.EditorSelection(out AStart, AEnd: Integer): Boolean;
+var
+  C: TATCaretItem;
+  P1, P2: TPoint;
+  Swap: Integer;
+begin
+  AStart := 0;
+  AEnd := 0;
+  Result := Assigned(BCEditor1) and (BCEditor1.Carets.Count > 0);
+  if not Result then
+    Exit;
+  C := BCEditor1.Carets[0];
+  P1 := Point(C.PosX, C.PosY);
+  if C.EndX >= 0 then
+    P2 := Point(C.EndX, C.EndY)
+  else
+    P2 := P1;
+  AStart := BCEditor1.CaretPosToOffset(P1);
+  AEnd := BCEditor1.CaretPosToOffset(P2);
+  if (AStart < 0) or (AEnd < 0) then
+  begin
+    Result := False;
+    Exit;
+  end;
+  if AEnd < AStart then
+  begin
+    Swap := AStart;
+    AStart := AEnd;
+    AEnd := Swap;
+  end;
+end;
+
+// One replace, one undo step: the delete and the insert are separate editor
+// commands, so they are wrapped in an undo group, and only then is the
+// selection the engine asked for restored.
+procedure TForm1.ApplyMdEdit(const AEdit: TMdEdit);
+var
+  P, Q, PSel, QSel: TPoint;
+begin
+  if not AEdit.Changed then
+    Exit;
+  if not Assigned(BCEditor1) then
+    Exit;
+  P := BCEditor1.OffsetToCaretPos(AEdit.StartOffset);
+  Q := BCEditor1.OffsetToCaretPos(AEdit.EndOffset);
+  if (P.X < 0) or (Q.X < 0) then
+    Exit;
+  BCEditor1.Strings.BeginUndoGroup;
+  try
+    BCEditor1.Carets[0].Change(P.X, P.Y, Q.X, Q.Y);
+    if AEdit.StartOffset <> AEdit.EndOffset then
+      BCEditor1.DoCommand(cCommand_TextDeleteSelection, TATCommandInvoke.Internal);
+    if AEdit.InsertText <> '' then
+      BCEditor1.TextInsertAtCarets(AEdit.InsertText, False, False, False);
+    PSel := BCEditor1.OffsetToCaretPos(AEdit.SelStart);
+    QSel := BCEditor1.OffsetToCaretPos(AEdit.SelEnd);
+    BCEditor1.Carets[0].Change(PSel.X, PSel.Y, QSel.X, QSel.Y);
+    if AEdit.SelStart = AEdit.SelEnd then
+      BCEditor1.Carets[0].SelectNone;
+  finally
+    BCEditor1.Strings.EndUndoGroup;
+  end;
+  BCEditor1.DoShowPos(PSel, 0, 0, True, True, True);
+  BCEditor1.SetFocus;
+end;
+
+procedure TForm1.MdCommandClick(Sender: TObject);
+begin
+  if Sender is TComponent then
+    MdExecute(TMdCommand(TComponent(Sender).Tag));
+  // The sender was a menu item or a bar button and has the focus now; the
+  // command may have changed nothing at all (bold on an empty line), so hand
+  // the keyboard back to the editor either way.
+  if Assigned(BCEditor1) then
+    BCEditor1.SetFocus;
+end;
+
+procedure TForm1.MdExecute(ACommand: TMdCommand);
+var
+  S, E: Integer;
+  T: UnicodeString;
+begin
+  if ACommand = mcCompleteWord then
+  begin
+    MdCompleteWord;
+    Exit;
+  end;
+  if ACommand = mcLink then
+  begin
+    MdInsertLinkCommand;
+    Exit;
+  end;
+  if ACommand = mcImage then
+  begin
+    MdInsertImageCommand;
+    Exit;
+  end;
+  if ACommand = mcTable then
+  begin
+    MdInsertTableCommand;
+    Exit;
+  end;
+  if not EditorSelection(S, E) then
+    Exit;
+  T := BCEditor1.Text;
+  case ACommand of
+    mcBold: ApplyMdEdit(MdToggleInline(T, S, E, '**'));
+    mcItalic: ApplyMdEdit(MdToggleInline(T, S, E, '*'));
+    mcStrike: ApplyMdEdit(MdToggleInline(T, S, E, '~~'));
+    mcCode: ApplyMdEdit(MdToggleInline(T, S, E, '`'));
+    mcCodeBlock: ApplyMdEdit(MdToggleFence(T, S, E));
+    mcHeading: ApplyMdEdit(MdCycleHeading(T, S, E));
+    mcQuote: ApplyMdEdit(MdToggleLinePrefix(T, S, E, '> '));
+    mcList: ApplyMdEdit(MdToggleLinePrefix(T, S, E, '- '));
+    mcOrdered: ApplyMdEdit(MdToggleLinePrefix(T, S, E, '1. '));
+    mcTask: ApplyMdEdit(MdToggleTask(T, S, E));
+    mcRule: ApplyMdEdit(MdInsertRule(T, S));
+  else
+    ;
+  end;
+end;
+
+// A link is rebuilt from the dialog's own three values, so editing an existing
+// one replaces the whole markup instead of nesting a second pair of brackets.
+procedure TForm1.MdInsertLinkCommand;
+var
+  S, E, MS, ME: Integer;
+  T, UText, UTarget, UTitle: UnicodeString;
+  Text, Target, Title: string;
+  Editing: Boolean;
+  Edit: TMdEdit;
+begin
+  if not EditorSelection(S, E) then
+    Exit;
+  T := BCEditor1.Text;
+  Editing := MdFindMarkupAt(T, S, False, MS, ME, UText, UTarget, UTitle);
+  if Editing then
+  begin
+    Text := string(UText);
+    Target := string(UTarget);
+    Title := string(UTitle);
+  end
+  else
+  begin
+    Text := '';
+    if E > S then
+      Text := string(Copy(T, S + 1, E - S));
+    Target := '';
+    Title := '';
+    MS := S;
+    ME := E;
+  end;
+  if not MdShowLinkDialog(ThemeIsDark, Text, Target, Title) then
+    Exit;
+  Edit.Changed := True;
+  Edit.StartOffset := MS;
+  Edit.EndOffset := ME;
+  Edit.InsertText := MdBuildLink(UnicodeString(Text), UnicodeString(Target),
+    UnicodeString(Title));
+  Edit.SelStart := MS + 1;
+  Edit.SelEnd := MS + 1 + Length(UnicodeString(Text));
+  ApplyMdEdit(Edit);
+end;
+
+// Same for images, plus the "copy into assets/" answer, which is remembered
+// for the session (FImageCopyToAssets).
+procedure TForm1.MdInsertImageCommand;
+var
+  S, E, MS, ME: Integer;
+  T, UText, UTarget, UTitle: UnicodeString;
+  Alt, Src, Title: string;
+  Editing: Boolean;
+  Edit: TMdEdit;
+begin
+  if not EditorSelection(S, E) then
+    Exit;
+  T := BCEditor1.Text;
+  Editing := MdFindMarkupAt(T, S, True, MS, ME, UText, UTarget, UTitle);
+  if Editing then
+  begin
+    Alt := string(UText);
+    Src := string(UTarget);
+    Title := string(UTitle);
+  end
+  else
+  begin
+    Alt := '';
+    if E > S then
+      Alt := string(Copy(T, S + 1, E - S));
+    Src := '';
+    Title := '';
+    MS := S;
+    ME := E;
+  end;
+  if not MdShowImageDialog(ThemeIsDark, ExtractFileDir(CurrentFile),
+    Alt, Src, Title, FImageCopyToAssets) then
+    Exit;
+  Edit.Changed := True;
+  Edit.StartOffset := MS;
+  Edit.EndOffset := ME;
+  Edit.InsertText := MdBuildImage(UnicodeString(Alt), UnicodeString(Src),
+    UnicodeString(Title));
+  Edit.SelStart := MS + 2;
+  Edit.SelEnd := MS + 2 + Length(UnicodeString(Alt));
+  ApplyMdEdit(Edit);
+end;
+
+procedure TForm1.MdInsertTableCommand;
+var
+  S, E, Rows, Cols: Integer;
+begin
+  if not EditorSelection(S, E) then
+    Exit;
+  Rows := 2;
+  Cols := 3;
+  if not MdShowTableDialog(ThemeIsDark, Rows, Cols) then
+    Exit;
+  ApplyMdEdit(MdInsertTable(BCEditor1.Text, S, Rows, Cols));
+end;
+
+// Ctrl+Space: the word before the caret is completed from the document, and
+// pressing it again cycles through the candidates. No popup, so no focus game
+// and nothing covers the text; the typed prefix is never replaced by itself.
+procedure TForm1.MdCompleteWord;
+var
+  S, E, WStart, WEnd, RStart, REnd, i, Next: Integer;
+  T, Prefix, Cand: UnicodeString;
+  Cycling: Boolean;
+  Edit: TMdEdit;
+begin
+  if not EditorSelection(S, E) then
+    Exit;
+  if S <> E then
+    Exit;
+  T := BCEditor1.Text;
+  Prefix := MdWordBeforeCaret(T, S, WStart);
+  // The caret may sit in the middle of a word that was already typed: the
+  // candidate then replaces the whole word, not just what is left of the caret.
+  WEnd := S;
+  if MdWordRange(T, S, RStart, REnd) and (RStart = WStart) and (REnd >= S) then
+    WEnd := REnd;
+  Cycling := FComplActive and (FComplStart = WStart) and (FComplIndex >= 0)
+    and (WEnd >= FComplStart)
+    and (Copy(T, FComplStart + 1, WEnd - FComplStart) = FComplLast);
+  if not Cycling then
+  begin
+    if Length(Prefix) < 2 then
+      Exit;
+    FComplWords := MdCollectWords(T, 2);
+    FComplPrefix := Prefix;
+    FComplStart := WStart;
+    FComplIndex := -1;
+    FComplActive := True;
+  end;
+  Next := -1;
+  for i := 0 to High(FComplWords) do
+    if (i > FComplIndex) and MdStartsWithText(FComplWords[i], FComplPrefix)
+      and not MdEqualText(FComplWords[i], FComplPrefix) then
+    begin
+      Next := i;
+      Break;
+    end;
+  if Next < 0 then
+    // past the last candidate: start again from the first one
+    for i := 0 to High(FComplWords) do
+      if MdStartsWithText(FComplWords[i], FComplPrefix)
+        and not MdEqualText(FComplWords[i], FComplPrefix) then
+      begin
+        Next := i;
+        Break;
+      end;
+  if Next < 0 then
+    Exit;
+  Cand := FComplWords[Next];
+  FComplIndex := Next;
+  FComplLast := Cand;
+  FComplCaret := FComplStart + Length(Cand);
+  Edit.Changed := True;
+  Edit.StartOffset := FComplStart;
+  Edit.EndOffset := WEnd;
+  Edit.InsertText := Cand;
+  Edit.SelStart := FComplCaret;
+  Edit.SelEnd := FComplCaret;
+  ApplyMdEdit(Edit);
+end;
+
+function TForm1.AddMdMenuItem(AParent: TMenuItem; const ACaption: string;
+  ACommand: TMdCommand; AShortCut: TShortCut): TMenuItem;
+begin
+  Result := TMenuItem.Create(AParent);
+  Result.Caption := ACaption;
+  Result.Tag := Ord(ACommand);
+  Result.OnClick := MdCommandClick;
+  if AShortCut <> 0 then
+    Result.ShortCut := AShortCut;
+  AParent.Add(Result);
+end;
+
+// The format bar: a plain panel of flat text buttons over the editor. It is an
+// alTop control, so the align pass gives the panes below it the rest of the
+// window -- the tree/editor/viewer order and widths are untouched.
+procedure TForm1.BuildFormatBar;
+var
+  x: Integer;
+  B: TSpeedButton;
+
+  procedure AddBtn(const ACaption, AHint: string; ACmd: TMdCommand;
+    AWidth: Integer; AStyle: TFontStyles);
+  begin
+    B := TSpeedButton.Create(FFormatBar);
+    B.Parent := FFormatBar;
+    B.Flat := True;
+    B.Caption := ACaption;
+    B.Hint := AHint;
+    B.ShowHint := True;
+    B.Left := x;
+    B.Top := 3;
+    B.Width := AWidth;
+    B.Height := 24;
+    B.Tag := Ord(ACmd);
+    B.OnClick := MdCommandClick;
+    B.Font.Style := AStyle;
+    SetLength(FFormatButtons, Length(FFormatButtons) + 1);
+    FFormatButtons[High(FFormatButtons)] := B;
+    Inc(x, AWidth + 2);
+  end;
+
+begin
+  if Assigned(FFormatBar) then
+    Exit;
+  FFormatBar := TPanel.Create(Self);
+  FFormatBar.Parent := Self;
+  FFormatBar.Align := alTop;
+  FFormatBar.Height := 30;
+  FFormatBar.BevelOuter := bvNone;
+  FFormatBar.Caption := '';
+  FFormatBar.Visible := False;
+  x := 4;
+  AddBtn('B', 'Bold (Ctrl+B)', mcBold, 26, [fsBold]);
+  AddBtn('I', 'Italic (Ctrl+I)', mcItalic, 26, [fsItalic]);
+  AddBtn('S', 'Strikethrough (Ctrl+Shift+X)', mcStrike, 26, []);
+  AddBtn('<>', 'Inline code (Ctrl+`)', mcCode, 28, []);
+  AddBtn('```', 'Code block (Ctrl+Shift+K)', mcCodeBlock, 32, []);
+  AddBtn('H', 'Heading, cycles the # level (Ctrl+Shift+H)', mcHeading, 26, []);
+  AddBtn('>', 'Quote (Ctrl+Shift+Q)', mcQuote, 26, []);
+  AddBtn('*', 'Bullet list (Ctrl+Shift+U)', mcList, 26, []);
+  AddBtn('1.', 'Numbered list (Ctrl+Shift+O)', mcOrdered, 26, []);
+  AddBtn('[]', 'Task item (Ctrl+Shift+T)', mcTask, 26, []);
+  AddBtn('Link', 'Link (Ctrl+K)', mcLink, 38, []);
+  AddBtn('Image', 'Image (Ctrl+Shift+I)', mcImage, 44, []);
+  AddBtn('Table', 'Table', mcTable, 46, []);
+  AddBtn('---', 'Horizontal rule', mcRule, 30, []);
+  AddBtn('Word', 'Complete word (Ctrl+Space)', mcCompleteWord, 42, []);
+  ApplyFormatBarTheme;
+end;
+
+procedure TForm1.ApplyFormatBarTheme;
+var
+  i: Integer;
+begin
+  if not Assigned(FFormatBar) then
+    Exit;
+  for i := 0 to High(FFormatButtons) do
+    FFormatButtons[i].Font.Color := FFormatBar.Font.Color;
+end;
+
+
 
 procedure TForm1.mnuEditorToggleClick(Sender: TObject);
 begin
@@ -3523,6 +4008,8 @@ begin
          FEditorOpts.WrapMode := Ord(TATEditorWrapMode.AtWindowOrMargin)
        else
          FEditorOpts.WrapMode := Ord(TATEditorWrapMode.ModeOff);
+    5: FEditorOpts.ShowFormatBar := not FEditorOpts.ShowFormatBar;
+    6: FEditorOpts.SmartEnter := not FEditorOpts.SmartEnter;
   end;
   ApplyEditorOptions;
   UpdateEditorMenuChecks;
@@ -3734,7 +4221,14 @@ begin
   // the status bar are the chrome around them, and they follow the same theme
   // so the window does not end up half dark. Menus belong to the widgetset and
   // keep its own look.
+  FThemeDark := ADark;
   Color := Bg;
+  if Assigned(FFormatBar) then
+  begin
+    FFormatBar.Color := Bg;
+    FFormatBar.Font.Color := Fg;
+    ApplyFormatBarTheme;
+  end;
   if Assigned(Tree) then
   begin
     Tree.Color := Bg;
@@ -4171,12 +4665,83 @@ end;
 
 procedure TForm1.BCEditor1KeyDown(Sender: TObject; var Key: Word;
   Shift: TShiftState);
+var
+  Cont: TMdContinuation;
+  C: TATCaretItem;
+  Line: UnicodeString;
+  i, Fences: Integer;
 begin
-{  if(Key = Ord('A')) and (ssCtrl in Shift) then
+  // Smart Enter: a list item, a quote or a task continues itself, and an empty
+  // one exits the block instead of starting another. Only the plain Enter, and
+  // only at the end of the line: mid-line splitting stays the editor's job.
+  if (Key = VK_RETURN) and (Shift = []) and FEditorOpts.SmartEnter
+    and Assigned(BCEditor1) and (BCEditor1.Carets.Count > 0) then
   begin
-    TMemo(Sender).SelectAll;
-    Key := 0;
-  end;} //superseded by hot key on menu
+    C := BCEditor1.Carets[0];
+    if C.EndX < 0 then
+    begin
+      Line := BCEditor1.Strings.Lines[C.PosY];
+      Fences := 0;
+      i := C.PosY - 1;
+      while i >= 0 do
+      begin
+        if MdIsFenceLine(BCEditor1.Strings.Lines[i]) then
+          Inc(Fences);
+        Dec(i);
+      end;
+      Cont := MdContinuation(Line, C.PosX, Odd(Fences));
+      if Cont.Kind = mdContinue then
+      begin
+        // The editor's own Enter (it knows the auto-indent), then the marker,
+        // as one undo step.
+        BCEditor1.Strings.BeginUndoGroup;
+        try
+          BCEditor1.DoCommand(cCommand_KeyEnter, TATCommandInvoke.Hotkey);
+          if Cont.Prefix <> '' then
+            BCEditor1.TextInsertAtCarets(Cont.Prefix, False, False, False);
+        finally
+          BCEditor1.Strings.EndUndoGroup;
+        end;
+        Key := 0;
+        Exit;
+      end;
+      if Cont.Kind = mdExitList then
+      begin
+        BCEditor1.Carets[0].Change(0, C.PosY, C.PosX, C.PosY);
+        BCEditor1.DoCommand(cCommand_TextDeleteSelection, TATCommandInvoke.Internal);
+        Key := 0;
+        Exit;
+      end;
+    end;
+  end;
+
+  // The Markdown commands. The menu items carry the same ShortCut for display,
+  // but TWinControl checks the popup menu's shortcuts only after the key went
+  // through this handler, and this consumes it, so nothing runs twice.
+  if Shift = [ssCtrl] then
+  begin
+    case Key of
+      Ord('B'): begin MdExecute(mcBold); Key := 0; Exit; end;
+      Ord('I'): begin MdExecute(mcItalic); Key := 0; Exit; end;
+      Ord('K'): begin MdExecute(mcLink); Key := 0; Exit; end;
+      VK_SPACE: begin MdExecute(mcCompleteWord); Key := 0; Exit; end;
+      VK_OEM_3: begin MdExecute(mcCode); Key := 0; Exit; end;
+      Ord('`'): begin MdExecute(mcCode); Key := 0; Exit; end;
+    end;
+  end
+  else if Shift = [ssCtrl, ssShift] then
+  begin
+    case Key of
+      Ord('X'): begin MdExecute(mcStrike); Key := 0; Exit; end;
+      Ord('K'): begin MdExecute(mcCodeBlock); Key := 0; Exit; end;
+      Ord('H'): begin MdExecute(mcHeading); Key := 0; Exit; end;
+      Ord('Q'): begin MdExecute(mcQuote); Key := 0; Exit; end;
+      Ord('U'): begin MdExecute(mcList); Key := 0; Exit; end;
+      Ord('O'): begin MdExecute(mcOrdered); Key := 0; Exit; end;
+      Ord('T'): begin MdExecute(mcTask); Key := 0; Exit; end;
+      Ord('I'): begin MdExecute(mcImage); Key := 0; Exit; end;
+    end;
+  end;
 end;
 
 procedure TForm1.BCEditor1KeyUp(Sender: TObject; var Key: Word;
