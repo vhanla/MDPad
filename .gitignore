@@ -99,3 +99,5 @@ settings.ini
 lib.lxl
 # Release build output (Default/Debug write into lib/)
 /MarkDownPad
+# Release artifacts built by tools/build-release.sh
+/dist/

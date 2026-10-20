@@ -646,6 +646,10 @@ var
 
 implementation
 uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} LCLIntf, Printers, PrintersDlgs, Types, Math,
+  // DirectoryIsWritable/FileIsWritable: whether settings.ini may live next to
+  // the binary or has to go to the user's config directory (see
+  // SettingsFileName).
+  LazFileUtils,
   // TATEditorColors, the editor's palette record (see SetEditorPalette).
   ATSynEdit_Colors,
   // TecSyntaxFormat: the per-token colors of a lexer (see SetLexerFormat).
@@ -654,6 +658,13 @@ uses {$IFDEF MSWINDOWS}activex, registry,{$ENDIF} LCLIntf, Printers, PrintersDlg
   // is read from a helper process on Unix.
   System.JSON, Process;
 {$R *.lfm}
+
+var
+  // Resolved once by SettingsFileName: the ini cannot move mid-session.
+  FSettingsFile: string;
+
+// Where settings.ini lives (see the body for the portable/installed rule).
+function SettingsFileName: string; forward;
 
 // ---------------------------------------------------------------------------
 // Theming helpers
@@ -2537,7 +2548,7 @@ var
 ini: TIniFile;
 i: Integer;
 begin
-  ini:=TIniFile.Create(ExtractFilePath(ParamStr(0))+'settings.ini');
+  ini:=TIniFile.Create(SettingsFileName);
     try
       ini.WriteString('MDPad','fontname',BCEditor1.Font.Name);
       ini.WriteInteger('MDPad','fontsize',BCEditor1.Font.Size);
@@ -2972,6 +2983,43 @@ begin
   SyncEditorToPreview;
 end;
 
+// Where settings.ini lives. A portable copy (a checkout, the release tarball,
+// an unzipped build) keeps it next to the binary, as it always did. A system
+// install (/usr, /opt, a Flatpak, an AppImage) gives that folder to root or
+// mounts it read-only, and there TIniFile.Create cannot even create the file,
+// so those use the user's config directory instead -- XDG_CONFIG_HOME/mdpad
+// (a Flatpak sandbox sets XDG_CONFIG_HOME to its own tree on its own).
+function SettingsFileName: string;
+var
+  ExeDir, ConfigDir: string;
+begin
+  if FSettingsFile <> '' then
+    Exit(FSettingsFile);
+  ExeDir := ExtractFilePath(ParamStr(0));
+  {$IFDEF MSWINDOWS}
+  // The Windows build travels as a portable folder: next to the exe, as before.
+  FSettingsFile := ExeDir + 'settings.ini';
+  {$ELSE}
+  if FileExists(ExeDir + 'settings.ini') then
+  begin
+    if FileIsWritable(ExeDir + 'settings.ini') then
+      FSettingsFile := ExeDir + 'settings.ini';
+  end
+  else if DirectoryIsWritable(ExeDir) then
+    FSettingsFile := ExeDir + 'settings.ini';
+  if FSettingsFile = '' then
+  begin
+    ConfigDir := GetEnvironmentVariable('XDG_CONFIG_HOME');
+    if ConfigDir = '' then
+      ConfigDir := GetUserDir + '.config';
+    ConfigDir := IncludeTrailingPathDelimiter(ConfigDir) + 'mdpad';
+    ForceDirectories(ConfigDir);
+    FSettingsFile := IncludeTrailingPathDelimiter(ConfigDir) + 'settings.ini';
+  end;
+  {$ENDIF}
+  Result := FSettingsFile;
+end;
+
 procedure TForm1.LoadINI;
 var
 ini:tinifile;
@@ -2979,7 +3027,7 @@ theme: string;
 i: Integer;
 s: string;
 begin
-  ini:=TIniFile.Create(ExtractFilePath(ParamStr(0))+'settings.ini');
+  ini:=TIniFile.Create(SettingsFileName);
     try
       BCEditor1.Font.Name:=ini.ReadString('MDPad','fontname','consolas');
       BCEditor1.Font.Size:=ini.ReadInteger('MDPad','fontsize',11);

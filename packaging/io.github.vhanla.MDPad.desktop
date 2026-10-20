@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MDPad
+GenericName=Markdown Editor
+Comment=Simple, fast Markdown editor and viewer
+Exec=mdpad %F
+Icon=mdpad
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/markdown;
+Keywords=markdown;editor;viewer;text;notepad;
+StartupNotify=true
+StartupWMClass=mdpad

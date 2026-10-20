@@ -2750,7 +2750,7 @@ MARKDOWNIT = '<script type="text/javascript">'
 +#13'        </script>';
 
 
-ABOUTMDPAD = 'MDPad v 1.3.3 beta'
+ABOUTMDPAD = 'MDPad v 1.3.7 beta'
 +#13' Author: Victor Alberto Gil <vhanla>'
 +#13' http://apps.codigobit.info'
 +#13

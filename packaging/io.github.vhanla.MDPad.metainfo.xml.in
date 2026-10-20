@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.vhanla.MDPad</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>MDPad</name>
+  <summary>Simple, fast Markdown editor and viewer</summary>
+  <description>
+    <p>
+      MDPad is a small native Markdown editor and viewer. It opens files
+      instantly, edits with syntax highlighting and inline formatting commands,
+      and renders the result next to the text as you type.
+    </p>
+    <p>
+      The preview can be the cross-platform HTML viewer, an embedded browser on
+      Windows, or Markdown4D's own canvas renderer, which needs no browser at
+      all. Documents are converted by a native Markdown engine (CommonMark/GFM),
+      a second native GFM implementation, or one of the bundled JavaScript
+      engines on Windows.
+    </p>
+    <p>
+      Features include a table of contents, two-way scroll sync, light and dark
+      themes, a formatting bar, link, image and table dialogs, Smart Enter for
+      lists and quotes, word completion, recent files, and HTML export.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.vhanla.MDPad.desktop</launchable>
+  <url type="homepage">https://github.com/vhanla/MDPad</url>
+  <url type="bugtracker">https://github.com/vhanla/MDPad/issues</url>
+  <developer id="io.github.vhanla">
+    <name>vhanla</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>
