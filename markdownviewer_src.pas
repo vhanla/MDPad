@@ -90,7 +90,7 @@ uses
     ATSynEdit_Bookmarks,
     ATSynEdit_Export_HTML,
     ATSynEdit_Globals,
-  mdoptions, mdformat, mddialogs, IniFiles,
+  mdoptions, mdformat, mddialogs, mdcli, IniFiles,
   ec_SyntAnal,
   ec_proc_lexer,
   HtmlView, HtmlGlobals,
@@ -198,6 +198,14 @@ type
     mcLink, mcImage, mcTable, mcRule, mcCompleteWord);
 
   { TForm1 }
+
+  // Which persisted settings a command line option has overridden for
+  // this session (see ApplyStartupOptions and SaveINI). While a flag is
+  // here, SaveINI leaves the stored value alone; the matching menu pick
+  // (or an Options dialog value that really changed) clears it, which is
+  // what keeps a CLI tweak a one-session thing instead of a new default.
+  TStartupOverride = (soPreview, soEngine, soTree, soTheme, soZoom,
+    soSyntax, soSync, soRemoteImages);
 
   TForm1 = class(TForm)
     OpenDialog1: TOpenDialog;
@@ -339,6 +347,11 @@ type
     procedure mnuViewTreeClick(Sender: TObject);
     procedure ApplyTreeVisible(AVisible: Boolean);
     procedure RefreshTree;
+    // Command line overrides (mdcli.pas): applied once after LoadINI and
+    // kept out of SaveINI until the same pick is made in the menus.
+    procedure ApplyStartupOptions;
+    procedure SetViewChecks(AView: TMdCliView);
+    procedure ClearStartupOverride(AOverride: TStartupOverride);
     procedure Wordwrap1Click(Sender: TObject);
 
     procedure tmrScrollSyncerTimer(Sender: TObject);
@@ -367,6 +380,13 @@ type
     TrackBar1_Position:integer;
     SelectedEngine: Integer;
     SelectedPreview: Integer; // pvHTML / pvMARKDOWN4D / pvIE
+    // Axes the command line overrode for this run (see TStartupOverride
+    // and ApplyStartupOptions): SaveINI skips their keys until the GUI
+    // picks them, so a launch with options does not rewrite settings.ini.
+    FStartupOverrides: set of TStartupOverride;
+    // True while the zoom slider is moved from code (FormShow, the Options
+    // dialog): a TrackBar1Change then is not the user asking for a zoom.
+    FApplyingZoom: Boolean;
 // Which palette the editor and the previews are painted with (see
     // ApplyTheme). Saved as "theme" the moment it is picked, like the engine
     // and the preview backend.
@@ -1724,6 +1744,7 @@ end;
 // contents are built once, from whatever headings the current document has.
 procedure TForm1.mnuViewTreeClick(Sender: TObject);
 begin
+  ClearStartupOverride(soTree);
   ApplyTreeVisible(not FTreeVisible);
   SaveINI;
 end;
@@ -2160,6 +2181,11 @@ begin
 
   LoadINI;
 
+  // Command line overrides, and the "a markdown file opens as a reader"
+  // default, go on top of the saved values. ApplyStartupOptions marks each
+  // overridden axis so SaveINI leaves the stored value alone.
+  ApplyStartupOptions;
+
   // Push the options LoadINI read into the editor before the first paint, and
   // bring the Editor menu's checks in line with them.
   ApplyEditorOptions;
@@ -2188,19 +2214,17 @@ begin
   //THtmlViewer path loads synchronously so open it right away)
   if UsingIE then
   begin
-    if ParamCount>0 then
-      ReadingFromExplorer:=True
-    else
-      ReadingFromExplorer:=False;
+    // IE resolves the file on DocumentComplete; mdcli already knows which.
+    ReadingFromExplorer := MdCliOpts.FileName <> '';
   end
   else
   {$ENDIF}
   begin
     ReadingFromExplorer:=False;
-    if ParamCount>0 then
+    if MdCliOpts.FileName <> '' then
     begin
-      OpenMDFile(ParamStr(1));
-      AddToMRU(ParamStr(1));
+      OpenMDFile(MdCliOpts.FileName);
+      AddToMRU(MdCliOpts.FileName);
     end;
   end;
 end;
@@ -2278,8 +2302,14 @@ end;
 procedure TForm1.FormShow(Sender: TObject);
 begin
   if BCEditor1.Visible then
-  BCEditor1.SetFocus;
-  TrackBar1.Position:=TrackBar1_Position;
+    BCEditor1.SetFocus;
+  // Applying the saved (or --zoom) position is not a user drag.
+  FApplyingZoom := True;
+  try
+    TrackBar1.Position:=TrackBar1_Position;
+  finally
+    FApplyingZoom := False;
+  end;
 
 end;
 
@@ -2519,6 +2549,7 @@ end;}
 
 procedure TForm1.Synceditwithpreview1Click(Sender: TObject);
 begin
+  ClearStartupOverride(soSync);
   Synceditwithpreview1.Checked:=not Synceditwithpreview1.Checked;
   tmrScrollSyncer.Enabled:=Synceditwithpreview1.Checked;
   if Synceditwithpreview1.Checked then
@@ -2555,10 +2586,15 @@ begin
 
       ini.WriteInteger('MDPad','fontcolor',BCEditor1.Font.Color);
 
-      ini.WriteBool('MDPad','sync',Synceditwithpreview1.Checked);
+      // A command line override is not a new default: while one is in
+      // effect (and the same thing has not been picked in the GUI) the
+      // key keeps the value it already had, so this run changes nothing.
+      if not (soSync in FStartupOverrides) then
+        ini.WriteBool('MDPad','sync',Synceditwithpreview1.Checked);
       ini.WriteBool('MDPad','delay',Waitafewsecondsbeforeupdatingthepreview1.Checked);
       ini.WriteBool('MDPad','statusbar',Statusbar2.Checked);
-      ini.WriteBool('MDPad','tree',FTreeVisible);
+      if not (soTree in FStartupOverrides) then
+        ini.WriteBool('MDPad','tree',FTreeVisible);
       ini.WriteBool('MDPad','wordwrap',Wordwrap1.Checked);
 
       ini.WriteInteger('Window','editorposition',ViewersRatio);
@@ -2569,15 +2605,21 @@ begin
       ini.WriteInteger('Window','width',Width);
       ini.WriteInteger('Window','height',Height);
       end;
-      ini.WriteInteger('Preview','zoom',TrackBar1.Position);
+      if not (soZoom in FStartupOverrides) then
+        ini.WriteInteger('Preview','zoom',TrackBar1.Position);
 
-      ini.WriteInteger('MDPad', 'engine', SelectedEngine);
-      ini.WriteInteger('MDPad', 'preview', SelectedPreview);
+      if not (soEngine in FStartupOverrides) then
+        ini.WriteInteger('MDPad', 'engine', SelectedEngine);
+      if not (soPreview in FStartupOverrides) then
+        ini.WriteInteger('MDPad', 'preview', SelectedPreview);
 
-      ini.WriteBool('MDPad', 'syntaxenabled', mnuSyntax.Checked);
-      ini.WriteString('MDPad', 'theme', ThemeToName(SelectedTheme));
+      if not (soSyntax in FStartupOverrides) then
+        ini.WriteBool('MDPad', 'syntaxenabled', mnuSyntax.Checked);
+      if not (soTheme in FStartupOverrides) then
+        ini.WriteString('MDPad', 'theme', ThemeToName(SelectedTheme));
       ini.WriteBool('MDPad', 'cssenabled', mnuCSS.Checked);
-      ini.WriteBool('MDPad', 'remoteimages', Loadremoteimages1.Checked);
+      if not (soRemoteImages in FStartupOverrides) then
+        ini.WriteBool('MDPad', 'remoteimages', Loadremoteimages1.Checked);
 
       if Assigned(FMRU) then
       begin
@@ -3127,6 +3169,112 @@ begin
       ini.Free;
     end;
 
+end;
+
+// The zoom slider has six stops; --zoom accepts any percentage and snaps to
+// the closest one, so 150 and 150% land on the same position.
+function ZoomIndexForPct(APct: Integer): Integer;
+const
+  Pcts: array[0..5] of Integer = (50, 75, 100, 125, 150, 200);
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := 1 to High(Pcts) do
+    if Abs(APct - Pcts[I]) < Abs(APct - Pcts[Result]) then
+      Result := I;
+end;
+
+procedure TForm1.ClearStartupOverride(AOverride: TStartupOverride);
+begin
+  Exclude(FStartupOverrides, AOverride);
+end;
+
+procedure TForm1.SetViewChecks(AView: TMdCliView);
+begin
+  EditorandResult1.Checked := AView = cvBoth;
+  Editoronly1.Checked := AView = cvEditor;
+  Resultonly1.Checked := AView = cvResult;
+end;
+
+// Applies the command line options (mdcli.pas) on top of what LoadINI read.
+// Each axis that really changes is put in FStartupOverrides, which SaveINI
+// consults: the command line is a one-session view, not a new default, so a
+// launch with options does not rewrite settings.ini.
+procedure TForm1.ApplyStartupOptions;
+var
+  OnOff: Boolean;
+begin
+  if MdCliOpts.Theme <> ctKeep then
+  begin
+    case MdCliOpts.Theme of
+      ctSystem: SelectedTheme := atSYSTEM;
+      ctLight:  SelectedTheme := atLIGHT;
+      ctDark:   SelectedTheme := atDARK;
+      ctCustom: SelectedTheme := atCUSTOM;
+    end;
+    Include(FStartupOverrides, soTheme);
+    UpdateThemeInMenu;
+  end;
+
+  if MdCliOpts.Syntax <> csKeep then
+  begin
+    OnOff := MdCliOpts.Syntax = csOn;
+    mnuSyntax.Checked := OnOff;
+    Include(FStartupOverrides, soSyntax);
+  end;
+
+  if MdCliOpts.Sync <> csKeep then
+  begin
+    OnOff := MdCliOpts.Sync = csOn;
+    Synceditwithpreview1.Checked := OnOff;
+    tmrScrollSyncer.Enabled := OnOff;
+    Include(FStartupOverrides, soSync);
+  end;
+
+  if MdCliOpts.RemoteImages <> csKeep then
+  begin
+    OnOff := MdCliOpts.RemoteImages = csOn;
+    Loadremoteimages1.Checked := OnOff;
+    ApplyRemoteImagesSetting(False);
+    Include(FStartupOverrides, soRemoteImages);
+  end;
+
+  if MdCliOpts.Tree <> csKeep then
+  begin
+    FTreeVisible := MdCliOpts.Tree = csOn;
+    Include(FStartupOverrides, soTree);
+  end;
+
+  // The TMdCliPreview/TMdCliEngine ordinals are the pv*/md* ids on purpose
+  // (see mdcli.pas), so this needs no translation table.
+  if MdCliOpts.Engine <> ceKeep then
+  begin
+    SelectedEngine := Ord(MdCliOpts.Engine);
+    Include(FStartupOverrides, soEngine);
+    UpdateEngineInMenu;
+  end;
+
+  if MdCliOpts.Preview <> cpKeep then
+  begin
+    SelectedPreview := Ord(MdCliOpts.Preview);
+    Include(FStartupOverrides, soPreview);
+    UpdatePreviewInMenu;
+  end;
+
+  if MdCliOpts.Zoom <> 0 then
+  begin
+    TrackBar1_Position := ZoomIndexForPct(MdCliOpts.Zoom);
+    Include(FStartupOverrides, soZoom);
+  end;
+
+  // A markdown file argument opens as a reader -- result only, exactly the
+  // F9 layout -- while the table of contents stays as the last session left
+  // it. --view always wins; a non-markdown file keeps the menu default.
+  if MdCliOpts.View <> cvKeep then
+    SetViewChecks(MdCliOpts.View)
+  else if MdIsMarkdownFileName(MdCliOpts.FileName) then
+    SetViewChecks(cvResult);
 end;
 
 procedure TForm1.UpdateThemeInMenu;
@@ -4249,8 +4397,15 @@ begin
 
   if App.Zoom <> oldZoom then
   begin
-    TrackBar1.Position := App.Zoom;
-    TrackBar1Change(Self);
+    // A zoom changed in the dialog is a stored pick; the TrackBar1Change
+    // it raises must not look like a slider drag.
+    FApplyingZoom := True;
+    try
+      TrackBar1.Position := App.Zoom;
+      TrackBar1Change(Self);
+    finally
+      FApplyingZoom := False;
+    end;
   end;
 
   if App.SyncScroll <> oldSync then
@@ -4289,6 +4444,23 @@ begin
     UpdateResult;
     ApplyViewMode;
   end;
+
+  // Only an axis that really changed in the dialog is a user pick: a CLI
+  // override the dialog merely echoed stays session-only.
+  if App.Preview <> oldPreview then
+    ClearStartupOverride(soPreview);
+  if App.Engine <> oldEngine then
+    ClearStartupOverride(soEngine);
+  if App.Zoom <> oldZoom then
+    ClearStartupOverride(soZoom);
+  if TAppTheme(App.Theme) <> oldTheme then
+    ClearStartupOverride(soTheme);
+  if App.SyntaxEnabled <> oldSyntax then
+    ClearStartupOverride(soSyntax);
+  if App.SyncScroll <> oldSync then
+    ClearStartupOverride(soSync);
+  if App.RemoteImages <> oldRemote then
+    ClearStartupOverride(soRemoteImages);
 
   SaveINI;
 end;
@@ -4704,6 +4876,7 @@ procedure TForm1.mnuSyntaxClick(Sender: TObject);
 begin
   if not (Sender is TMenuItem) then
     Exit;
+  ClearStartupOverride(soSyntax);
   TMenuItem(Sender).Checked := not TMenuItem(Sender).Checked;
   SaveINI;
   ApplySyntaxEnabled;
@@ -4715,6 +4888,7 @@ procedure TForm1.mnuThemeSelect(Sender: TObject);
 begin
   if not (Sender is TMenuItem) then
     Exit;
+  ClearStartupOverride(soTheme);
   SelectedTheme := TAppTheme(TMenuItem(Sender).Tag);
   UpdateThemeInMenu;
   // The picked theme is what the next start should use, so it goes to disk
@@ -4731,7 +4905,7 @@ procedure TForm1.ToggleEngine(Sender: TObject);
 begin
   if Sender is TMenuItem then
   begin
-
+    ClearStartupOverride(soEngine);
     SelectedEngine := TMenuItem(Sender).Tag;
     UpdateEngineInMenu;
     // The picked engine is what the next start should use, so it goes to disk
@@ -4761,6 +4935,7 @@ procedure TForm1.TogglePreview(Sender: TObject);
 begin
   if Sender is TMenuItem then
   begin
+    ClearStartupOverride(soPreview);
     SelectedPreview := TMenuItem(Sender).Tag;
     UpdatePreviewInMenu;
     // Same as the engine pick: remember the backend at once, not only on exit.
@@ -5282,6 +5457,10 @@ const
 var
   pos: Integer;
 begin
+  // Moving the slider is the user's zoom pick; FormShow and the Options
+  // dialog move it from code with FApplyingZoom set.
+  if not FApplyingZoom then
+    ClearStartupOverride(soZoom);
   {$IFDEF MSWINDOWS}
   if UsingIE then
   begin
@@ -5662,12 +5841,14 @@ end;
 
 procedure TForm1.WebBrowser1DocumentComplete(Sender: TObject;pDisp:IDispatch;var URL:OleVariant);
 begin
-  if (ReadingFromExplorer) and (ParamCount>0) then
+  if (ReadingFromExplorer) and (MdCliOpts.FileName <> '') then
   begin
     ReadingFromExplorer:=False;
-    Resultonly1Click(Form1);
-    OpenMDFile(ParamStr(1));
-    AddToMRU(ParamStr(1));
+    // The startup view (--view, or the markdown-file default) is already
+    // applied; forcing "result only" here would undo --view=both.
+    ApplyViewMode;
+    OpenMDFile(MdCliOpts.FileName);
+    AddToMRU(MdCliOpts.FileName);
   end
   else if ReloadingEngine then
   begin
@@ -5709,6 +5890,7 @@ end;
 
 procedure TForm1.Loadremoteimages1Click(Sender: TObject);
 begin
+  ClearStartupOverride(soRemoteImages);
   Loadremoteimages1.Checked := not Loadremoteimages1.Checked;
   ApplyRemoteImagesSetting(True);
   SaveINI;

@@ -2750,7 +2750,9 @@ MARKDOWNIT = '<script type="text/javascript">'
 +#13'        </script>';
 
 
-ABOUTMDPAD = 'MDPad v 1.3.7 beta'
+// The one version number lives in mdcli.pas (MdVersion), so the About box and
+// --version cannot drift apart; tools/build-release.sh checks it against VERSION.
+ABOUTMDPAD = 'MDPad v ' + MdVersion + ' beta'
 +#13' Author: Victor Alberto Gil <vhanla>'
 +#13' http://apps.codigobit.info'
 +#13

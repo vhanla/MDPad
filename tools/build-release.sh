@@ -24,8 +24,9 @@
 # with it. --ws qt6 is supported for local testing (the AppImage then bundles
 # libQt6Pas, and the deb gains Qt6 dependencies; Flatpak is skipped).
 #
-# Version: --version, then $VERSION, then the VERSION file. It must match what
-# the About box shows (ABOUTMDPAD in pagedown.inc).
+# Version: --version, then $VERSION, then the VERSION file. It must match
+# MdVersion in mdcli.pas, which is what the About box and --version print (the
+# script refuses to build when they disagree).
 #
 # Environment overrides:
 #   LAZBUILD, PCP       Lazarus lazbuild and its --pcp directory
@@ -93,6 +94,12 @@ if [ -z "$VERSION" ]; then
 fi
 [[ $VERSION =~ ^[0-9]+(\.[0-9]+)+([._-][0-9A-Za-z]+)*$ ]] \
   || die "version '$VERSION' does not look like a release version"
+# The About box builds itself from MdVersion (mdcli.pas) and --version prints
+# it, so a release whose VERSION disagrees would ship a lying binary.
+SRC_VERSION=$(sed -n "s/^[[:space:]]*MdVersion[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" mdcli.pas | head -1)
+[ -n "$SRC_VERSION" ] || die "MdVersion not found in mdcli.pas"
+[ "$SRC_VERSION" = "$VERSION" ] \
+  || die "VERSION is $VERSION but MdVersion in mdcli.pas is $SRC_VERSION"
 DATE=${RELEASE_DATE:-$(date +%F)}
 # Reproducible artifacts: the tarball is referenced by the PKGBUILD and the
 # Flatpak manifest, so its hash must not change between two builds of the same
