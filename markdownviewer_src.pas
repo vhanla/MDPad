@@ -124,7 +124,10 @@ uses
   Markdown4D.Lcl.ImageDecoder,
   Markdown4D.Lcl.MathFont,
   Markdown4D.Lcl.Painter,
-  Markdown4D.Lcl.Viewer;
+  Markdown4D.Lcl.Viewer,
+  // IsMonospaceFamilyName: whether the editor's font may be pinned on code
+  // blocks (see EditorCodeFontName).
+  Markdown4D.Viewer.Shared;
 
 {$IFDEF MSWINDOWS}
 type
@@ -459,6 +462,8 @@ type
     // it is baked into. Also feeds PreviewCSS, which the JS engines use.
     procedure RefreshPreviewStyle(ADark: Boolean);
     procedure ApplyCanvasTheme(ADark: Boolean);
+    // The editor's font when it can be used for code, '' when it cannot.
+    function EditorCodeFontName: string;
     procedure ApplyChromeColors(ADark: Boolean);
     // Reads Theme.json (BCEditor's theme format, the one this app has always
     // shipped) into name -> color entries; ADark is what its editor background
@@ -1640,6 +1645,7 @@ procedure TForm1.Statusbar2Click(Sender: TObject);
 begin
 StatusBar2.Checked:= not Statusbar2.Checked;
 StatusBar1.Visible:=Statusbar2.Checked;
+SaveINI;
 end;
 
 
@@ -1791,15 +1797,23 @@ begin
 end;
 
 procedure TForm1.Font1Click(Sender: TObject);
+var
+  OldFont: string;
 begin
   // The font is one of the stored editor options now (it used to be reset to
   // Consolas on every start), so the pick goes through the record and is saved.
   FontDialog1.Font.Assign(BCEditor1.Font);
   if FontDialog1.Execute() then
   begin
+    OldFont := FEditorOpts.FontName;
     FEditorOpts.FontName := FontDialog1.Font.Name;
     FEditorOpts.FontSize := FontDialog1.Font.Size;
     ApplyEditorOptions;
+    // The previews' code font follows the editor's, and both the sheet and the
+    // canvas theme are written by ApplyTheme: re-render so the new face is what
+    // is on screen.
+    if not SameText(FEditorOpts.FontName, OldFont) then
+      ApplyTheme(True);
     SaveINI;
   end;
 end;
@@ -1903,7 +1917,8 @@ begin
   PreviewMd4D.Align := alClient;
   PreviewMd4D.Visible := False;
   PreviewMd4D.OnLinkClick := PreviewLinkClick;
-  PreviewMd4D.ThemePreset := TMarkdownThemePreset.Light;
+  // Its theme (the preset, or Md4dTheme.json, plus the editor's code font) is
+  // built and owned by ApplyCanvasTheme, which FormCreate calls right away.
 
   {$IFDEF MSWINDOWS}
   // Legacy IE WebBrowser instance, only for the JavaScript engines
@@ -2036,8 +2051,8 @@ begin
   {$ENDIF}
   PreviewHtml.Free;
   PreviewMd4D.Free;
-  // The viewer only frees the themes it created itself (the presets); the one
-  // built from Md4dTheme.json is MDPad's.
+  // The viewer only borrows the theme it was given (SetTheme never frees it),
+  // so the one ApplyCanvasTheme built is MDPad's, preset or Md4dTheme.json.
   FreeAndNil(FCanvasTheme);
 end;
 
@@ -2335,6 +2350,9 @@ begin
     SyncEditorToPreview;
     InvalidateScrollSync;
   end;
+  // The pick is on disk at once, like the theme/backend/engine ones: the save
+  // at FormDestroy never runs if the process is killed or hangs.
+  SaveINI;
 end;
 
 procedure TForm1.SyncScrolling;
@@ -2363,6 +2381,8 @@ begin
       ini.WriteBool('MDPad','wordwrap',Wordwrap1.Checked);
 
       ini.WriteInteger('Window','editorposition',ViewersRatio);
+      // Splitter2 resizes Tree; its Width is where the user left the splitter.
+      ini.WriteInteger('Window','treeposition',Tree.Width);
       if WindowState=wsNormal then
       begin
       ini.WriteInteger('Window','width',Width);
@@ -2799,6 +2819,16 @@ begin
       ViewersRatio:=ini.ReadInteger('Window','editorposition',50);
       Width:=ini.ReadInteger('Window','width',771);
       Height:=ini.ReadInteger('Window','height',472);
+
+      // Where Splitter2 was left: it resizes the alLeft tree. Clamped, because
+      // the value can come from another build or another screen, and a tree
+      // wider than the window would leave the editor with nothing.
+      i := ini.ReadInteger('Window','treeposition',Tree.Width);
+      if i > Width - 200 then
+        i := Width - 200;
+      if i < 50 then
+        i := 50;
+      Tree.Width := i;
 
       TrackBar1_Position:= ini.ReadInteger('Preview','zoom',2);
 
@@ -3547,7 +3577,9 @@ var
   oldPreview, oldEngine, oldZoom, oldMRU: Integer;
   oldTheme: TAppTheme;
   oldSyntax, oldCSS, oldSync, oldRemote: Boolean;
+  oldFont: string;
 begin
+  oldFont := FEditorOpts.FontName;
   App.Theme := Ord(SelectedTheme);
   App.SyntaxEnabled := mnuSyntax.Checked;
   App.CSSEnabled := mnuCSS.Checked;
@@ -3623,7 +3655,9 @@ begin
 
   // The theme repaints the sheet the preview is drawn into, so it goes before
   // the engine is reloaded (ApplyTheme(True) re-renders with the old engine).
-  if (SelectedTheme <> oldTheme) or (mnuCSS.Checked <> oldCSS) then
+  // A font pick belongs here too: the previews' code font is the editor's.
+  if (SelectedTheme <> oldTheme) or (mnuCSS.Checked <> oldCSS)
+    or not SameText(FEditorOpts.FontName, oldFont) then
     ApplyTheme(True);
 
   if (SelectedPreview <> oldPreview) or (SelectedEngine <> oldEngine) then
@@ -3725,34 +3759,76 @@ procedure TForm1.ApplyCanvasTheme(ADark: Boolean);
 var
   Preset: TMarkdownThemePreset;
   FileName: string;
-  Custom: TMarkdownTheme;
+  CodeFont: string;
+  Style: TMarkdownFontStyle;
+  Theme: TMarkdownTheme;
 begin
   if not Assigned(PreviewMd4D) then
     Exit;
 
   Preset := ThemePresetOf(ADark);
   FileName := ExtractFilePath(ParamStr(0)) + 'Md4dTheme.json';
+
+  // The theme is MDPad's in either case: the viewer's Theme property only
+  // borrows what it is given (SetTheme never frees it), and the code font has
+  // to be set on the object *before* the assignment, or the canvas is not laid
+  // out again with it.
+  Theme := TMarkdownTheme.CreatePreset(Preset);
   if (SelectedTheme = atCUSTOM) and FileExists(FileName) then
-  begin
-    Custom := TMarkdownTheme.CreatePreset(Preset);
     try
-      Custom.LoadFromJson(LoadFileToStr(FileName));
+      Theme.LoadFromJson(LoadFileToStr(FileName));
     except
-      // a broken file must not take the preview down: the preset stays
-      FreeAndNil(Custom);
+      // a broken file must not take the preview down: start from the preset
+      FreeAndNil(Theme);
+      Theme := TMarkdownTheme.CreatePreset(Preset);
     end;
-    if Assigned(Custom) then
-    begin
-      PreviewMd4D.Theme := Custom; // the viewer borrows it, MDPad owns it
-      FreeAndNil(FCanvasTheme);
-      FCanvasTheme := Custom;
-      Exit;
-    end;
+
+  // Same face as the editor for code (see EditorCodeFontName): the canvas is
+  // the one backend that draws the block itself, so a font that differs from
+  // the editor's shifts columns and box drawing between the two panes.
+  CodeFont := EditorCodeFontName;
+  if CodeFont <> '' then
+  begin
+    Style := Theme.CodeFont;
+    Style.FamilyName := CodeFont;
+    Theme.CodeFont := Style;
   end;
 
-  PreviewMd4D.ThemePreset := Preset;
+  PreviewMd4D.Theme := Theme; // borrowed; FCanvasTheme owns it
   FreeAndNil(FCanvasTheme);
+  FCanvasTheme := Theme;
 end;
+
+// The editor's font name when code may be drawn with it, '' otherwise. A
+// proportional face would break the column alignment a code block is for, so
+// only a monospace one is pinned (the HTML sheet and the canvas theme both call
+// this). A known monospace family that is not installed still counts: both
+// consumers fall back to an installed monospace face, while the widgetset's own
+// fallback for an unknown family may be the proportional UI font.
+function TForm1.EditorCodeFontName: string;
+var
+  Bmp: TBitmap;
+begin
+  Result := '';
+  if not Assigned(BCEditor1) then
+    Exit;
+  Result := BCEditor1.Font.Name;
+  if Result = '' then
+    Exit;
+  if TMarkdownViewerShared.IsMonospaceFamilyName(Result) then
+    Exit;
+  // Not a name we know: take the widgetset's word for it by measuring the face
+  // it actually substitutes, which is what the editor draws with.
+  Bmp := TBitmap.Create;
+  try
+    Bmp.Canvas.Font.Assign(BCEditor1.Font);
+    if Bmp.Canvas.TextWidth('MMMM') <> Bmp.Canvas.TextWidth('iiii') then
+      Result := '';
+  finally
+    Bmp.Free;
+  end;
+end;
+
 
 // The previews' style sheet: the theme's base sheet, plus the user's style.css
 // on top of it when "Enable Custom Style" is on. PreviewCSS is what the JS
@@ -3760,12 +3836,23 @@ end;
 // whole head the native HTML preview is rendered into.
 procedure TForm1.RefreshPreviewStyle(ADark: Boolean);
 var
-  Css, Extra, FileName: string;
+  Css, Extra, FileName, CodeFont: string;
 begin
   if ADark then
     Css := HTMLCSSDARK
   else
     Css := HTMLCSSLIGHT;
+
+  // Code blocks use the editor's font when that is a monospace one (see
+  // EditorCodeFontName): the same family as the editor, with monospace as the
+  // fallback when the system does not have it. Appended after the sheet so it
+  // wins over the sheet's own code rules, and before style.css so that file can
+  // still override it.
+  CodeFont := EditorCodeFontName;
+  if CodeFont <> '' then
+    Css := Css + sLineBreak
+      + 'code,pre,kbd,samp,.md code,.md pre{font-family:"' + CodeFont
+      + '",monospace;}';
 
   if mnuCSS.Checked then
   begin
@@ -3944,8 +4031,9 @@ begin
     Exit;
 
   if UsingMarkdown4D then
-    // SetTheme/SetThemePreset already laid the document out again and asked for
-    // a repaint; the next sync tick re-anchors the view.
+    // ApplyCanvasTheme's SetTheme already laid the document out again with the
+    // new theme (and its code font) and asked for a repaint; the next sync tick
+    // re-anchors the view.
     Exit;
 
   {$IFDEF MSWINDOWS}
@@ -4846,6 +4934,7 @@ end;
 procedure TForm1.Waitafewsecondsbeforeupdatingthepreview1Click(Sender: TObject);
 begin
   Waitafewsecondsbeforeupdatingthepreview1.Checked := not Waitafewsecondsbeforeupdatingthepreview1.Checked;
+  SaveINI;
 end;
 
 {$IFDEF MSWINDOWS}
@@ -4921,6 +5010,7 @@ procedure TForm1.Loadremoteimages1Click(Sender: TObject);
 begin
   Loadremoteimages1.Checked := not Loadremoteimages1.Checked;
   ApplyRemoteImagesSetting(True);
+  SaveINI;
 end;
 
 end.
