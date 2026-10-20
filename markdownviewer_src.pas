@@ -252,6 +252,7 @@ type
     StatusBar1: TStatusBar;
     Wordwrap1: TMenuItem;
     Statusbar2: TMenuItem;
+    mnuViewTree: TMenuItem;
     N10: TMenuItem;
     N12: TMenuItem;
     PreviewHtml1: TMenuItem;
@@ -335,6 +336,9 @@ type
     procedure tmrKeyEventTimer(Sender: TObject);
     procedure Waitafewsecondsbeforeupdatingthepreview1Click(Sender: TObject);
     procedure Statusbar2Click(Sender: TObject);
+    procedure mnuViewTreeClick(Sender: TObject);
+    procedure ApplyTreeVisible(AVisible: Boolean);
+    procedure RefreshTree;
     procedure Wordwrap1Click(Sender: TObject);
 
     procedure tmrScrollSyncerTimer(Sender: TObject);
@@ -404,6 +408,10 @@ type
     // Whether ApplyChromeColors painted the app dark (the dialogs and the
     // canvas ask before they pick their own palette).
     FThemeDark: Boolean;
+    // View > Table of contents. The tree is the table of contents and is filled
+    // on every render; while it is hidden the fill is skipped entirely (see
+    // UpdateTOC/RefreshTree) and it is rebuilt once when shown again.
+    FTreeVisible: Boolean;
 
     FCurrentRequestID: Int64; // A unique, increment ID for each conversion request
     FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
@@ -1699,6 +1707,66 @@ StatusBar1.Visible:=Statusbar2.Checked;
 SaveINI;
 end;
 
+// View > Table of contents. Hiding the tree takes it (and the splitter that
+// sizes it) out of the layout and stops the fill that every render used to
+// start, so a hidden tree costs nothing until it is shown again -- then the
+// contents are built once, from whatever headings the current document has.
+procedure TForm1.mnuViewTreeClick(Sender: TObject);
+begin
+  ApplyTreeVisible(not FTreeVisible);
+  SaveINI;
+end;
+
+procedure TForm1.ApplyTreeVisible(AVisible: Boolean);
+begin
+  FTreeVisible := AVisible;
+  mnuViewTree.Checked := AVisible;
+  if Tree.Visible = AVisible then
+  begin
+    // Already in place (the startup call, or the same pick twice): only the
+    // contents can be stale, and only when the tree is (or is being) shown.
+    if AVisible then
+      RefreshTree;
+    Exit;
+  end;
+
+  // Both controls are alLeft: Visible is what takes them out of the align pass
+  // (Enabled would leave them eating their width). ArrangePanes keeps the
+  // order, and the viewer -- the alClient pane -- absorbs the freed space.
+  DisableAlign;
+  try
+    Tree.Visible := AVisible;
+    Splitter2.Visible := AVisible;
+    ArrangePanes;
+  finally
+    EnableAlign;
+  end;
+
+  if AVisible then
+    RefreshTree;
+end;
+
+procedure _OnTreeDuplicateNode(ANode: TTreeNode; const AFileName: string); forward;
+
+// Fills the tree with whatever this document needs: EControl's own tree for the
+// lexers that declare one, the table of contents UpdateTOC builds for markdown.
+// Called when the tree is shown again, because while it was hidden every fill
+// was skipped.
+procedure TForm1.RefreshTree;
+begin
+  if not FTreeVisible then
+    Exit;
+  if (Adapter.Lexer <> nil) and not IsMarkdownLexer(Adapter.Lexer) then
+  begin
+    ClearTOC;
+    Adapter.TreeFill(Tree, 1000, false, '?', @_OnTreeDuplicateNode);
+    EditorChangeCaretPos(Self);
+  end
+  else
+    // UpdateTOC leaves the selection on the caret's heading itself.
+    UpdateTOC;
+end;
+
 
 procedure TForm1.UpdateEngineInMenu;
 begin
@@ -2076,6 +2144,8 @@ begin
   // A settings.ini without the key keeps this, the sensible default: a list
   // item continues itself when Enter is pressed.
   FEditorOpts.SmartEnter := True;
+  // The tree is the table of contents: on unless the last session hid it.
+  FTreeVisible := True;
 
   LoadINI;
 
@@ -2097,6 +2167,9 @@ begin
   LoadEngine;
   //apply the saved view mode (editor/result layout) to the active preview
   ApplyViewMode;
+  // View > Table of contents, after the view mode has laid the panes out: a
+  // hidden tree (and Splitter2) only has to be taken out of that layout.
+  ApplyTreeVisible(FTreeVisible);
 
   CurrentFile:=''; //none
   {$IFDEF MSWINDOWS}
@@ -2474,6 +2547,7 @@ begin
       ini.WriteBool('MDPad','sync',Synceditwithpreview1.Checked);
       ini.WriteBool('MDPad','delay',Waitafewsecondsbeforeupdatingthepreview1.Checked);
       ini.WriteBool('MDPad','statusbar',Statusbar2.Checked);
+      ini.WriteBool('MDPad','tree',FTreeVisible);
       ini.WriteBool('MDPad','wordwrap',Wordwrap1.Checked);
 
       ini.WriteInteger('Window','editorposition',ViewersRatio);
@@ -2716,7 +2790,9 @@ procedure TForm1.EditorChangeCaretPos(Sender: TObject);
 var
   NLine: integer;
 begin
-  if BCEditor1.Carets.Count>0 then
+  // Hidden tree: there is no node to select, and the walk over its items is
+  // part of what the toggle saves.
+  if FTreeVisible and (BCEditor1.Carets.Count>0) then
     with BCEditor1.Carets[0] do
       CodetreeSelectItemForPosition(Tree, PosX, PosY, NLine);
 end;
@@ -2734,6 +2810,11 @@ begin
   if Adapter.Lexer = nil then
     // Highlighting is off (Preferences > "Enable Syntax highlighter"): there is
     // no parse to fill anything from, and TreeFill needs a client.
+    Exit;
+  // The tree toggle: while the tree is hidden there is nothing to fill, and
+  // the whole point of hiding it is not to spend the time. RefreshTree builds
+  // the contents once, when it is shown again.
+  if not FTreeVisible then
     Exit;
   if IsMarkdownLexer(Adapter.Lexer) then
     UpdateTOC
@@ -2793,6 +2874,11 @@ var
   Node: TTreeNode;
   Range: TATRangeInCodeTree;
 begin
+  // View > Table of contents is off: nothing fills it, so a render costs only
+  // the preview itself. ApplyTreeVisible calls this once when it is shown
+  // again, and the headings are compared then as usual.
+  if not FTreeVisible then
+    Exit;
   if TocMatchesHeaders then
   begin
     EditorChangeCaretPos(Self);
@@ -2906,6 +2992,8 @@ begin
 
       Statusbar2.Checked:=ini.ReadBool('MDPad','statusbar',false);
       StatusBar1.Visible:=Statusbar2.Checked;
+      // View > Table of contents, on unless a session turned it off.
+      FTreeVisible := ini.ReadBool('MDPad','tree',true);
       Wordwrap1.Checked:=ini.ReadBool('MDPad','wordwrap',false);
       // That legacy key used to toggle OptWrapIndented (the wrap indent), which
       // only matters when wrapping is on -- so with wrapping off it looked dead.

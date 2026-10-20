@@ -2097,6 +2097,11 @@ object Form1: TForm1
       object N10: TMenuItem
         Caption = '-'
       end
+      object mnuViewTree: TMenuItem
+        Caption = '&Table of contents'
+        Checked = True
+        OnClick = mnuViewTreeClick
+      end
       object Statusbar2: TMenuItem
         Caption = '&Statusbar'
         OnClick = Statusbar2Click
