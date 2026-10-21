@@ -9,6 +9,10 @@
   +Everything in executable, no external html files
 
   Changelog:
+  - 2026-10-21 v1.4.0
+    - About window with the project, credits and third-party licenses
+    - Daily GitHub release check (Help > Check for updates), silent by default
+    - Command line options, and markdown files open as a reader
   - 2026-10-01 v1.3.7
     - Actually porting to Linux
   - 2018-09-23 v1.3.6
@@ -90,7 +94,8 @@ uses
     ATSynEdit_Bookmarks,
     ATSynEdit_Export_HTML,
     ATSynEdit_Globals,
-  mdoptions, mdformat, mddialogs, mdcli, IniFiles,
+  mdoptions, mdformat, mddialogs, mdcli, mdversioninfo, mdupdate, mdabout,
+  IniFiles, DateUtils,
   ec_SyntAnal,
   ec_proc_lexer,
   HtmlView, HtmlGlobals,
@@ -299,6 +304,8 @@ type
     mnuEditorFont: TMenuItem;
     mnuPrefOptions: TMenuItem;
     mnuPrefSep: TMenuItem;
+    mnuAutoUpdate: TMenuItem;
+    mnuCheckUpdates: TMenuItem;
     procedure FormCreate(Sender: TObject);
     procedure FormMouseDown(Sender: TObject; Button: TMouseButton;
       Shift: TShiftState; X, Y: Integer);
@@ -373,6 +380,13 @@ type
     procedure mnuOptionsClick(Sender: TObject);
     procedure mnuEditorToggleClick(Sender: TObject);
     procedure Loadremoteimages1Click(Sender: TObject);
+    procedure mnuCheckUpdatesClick(Sender: TObject);
+    procedure mnuAutoUpdateClick(Sender: TObject);
+    procedure tmrUpdateCheckTimer(Sender: TObject);
+    procedure StartUpdateCheck(AManual: Boolean);
+    procedure ApplyUpdateResult(const AResult: TMdUpdateResult);
+    procedure UpdateUpdateMenu;
+    function UpdateCheckDue: Boolean;
     procedure BCEditor1CaretChanged(Sender: TObject);
     procedure EditorPopupClick(Sender: TObject);
     procedure PreviewHotSpotClick(Sender: TObject; const SRC: ThtString; var Handled: Boolean);
@@ -432,6 +446,20 @@ type
     // on every render; while it is hidden the fill is skipped entirely (see
     // UpdateTOC/RefreshTree) and it is rebuilt once when shown again.
     FTreeVisible: Boolean;
+
+    // Update check ([Updates] in settings.ini). LastCheck is a Unix timestamp:
+    // an attempt, successful or not, backs the automatic check off for a day,
+    // while Help > Check for updates always works. The thread never touches the
+    // form; tmrUpdateCheckTimer reaps it once Finished, so closing the program
+    // only has to wait for the socket (see FormDestroy).
+    FUpdateAutoCheck: Boolean;
+    FUpdateLastCheck: Int64;
+    FUpdateLatest: string;
+    FUpdateLatestUrl: string;
+    FUpdateThread: TMdUpdateCheckThread;
+    FUpdateManual: Boolean;
+    FUpdateAutoPending: Boolean;
+    tmrUpdateCheck: TTimer;
 
     FCurrentRequestID: Int64; // A unique, increment ID for each conversion request
     FActiveTaskCount: Integer; // this will be a thread-safe counter of tasks running in order to wait them before closing our application (rare, for bigger markdowns maybe will be useful)
@@ -1464,15 +1492,179 @@ end;
 {$ENDIF}
 
 procedure TForm1.About1Click(Sender: TObject);
+var
+  Action: TMdAboutAction;
+  fn: string;
 begin
-//  ShellAbout(Handle, 'MDPad', 'MDPad v1.1 beta'#13'Written by vhanla - http://apps.codigobit.info', Application.Icon.Handle);
-  if FileExists(ExtractFilePath(ParamStr(0))+'Readme.md') then
+  // The dialog shows the credits and the last known release; it never does the
+  // network itself, so a slow check cannot freeze it.
+  Action := MdShowAboutDialog(FThemeDark, MdVersion, FUpdateLatest);
+  case Action of
+    aaCheckUpdates:
+      StartUpdateCheck(True);
+    aaReadme:
+      begin
+        fn := ExtractFilePath(ParamStr(0)) + 'Readme.md';
+        if FileExists(fn) then
+          OpenMDFile(fn)
+        else
+          MessageDlg('Readme.md was not found next to the program.',
+            mtWarning, [mbOK], 0);
+      end;
+    aaThirdParty:
+      begin
+        fn := ExtractFilePath(ParamStr(0)) + 'THIRDPARTY.md';
+        if FileExists(fn) then
+          OpenMDFile(fn)
+        else
+          MessageDlg('THIRDPARTY.md was not found next to the program.',
+            mtWarning, [mbOK], 0);
+      end;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+// Update check (mdupdate.pas)
+//
+// Help > Check for updates always works; the automatic one runs at most once a
+// day and never nags: it only changes the Help item's caption (and the About
+// box) to "Update available: X", so the user decides when to look. A failed
+// check backs off like a successful one, which keeps an offline machine from
+// retrying at every start.
+
+procedure TForm1.StartUpdateCheck(AManual: Boolean);
+begin
+  if FUpdateThread <> nil then
+    Exit;
+  FUpdateManual := AManual;
+  // Any check refreshes the state, so a pending automatic one is redundant.
+  FUpdateAutoPending := False;
+  FUpdateThread := TMdUpdateCheckThread.Create(MdVersion);
+  // The same timer that scheduled the check now waits for it; the thread never
+  // touches the form, so this is a plain poll.
+  tmrUpdateCheck.Interval := 250;
+  tmrUpdateCheck.Enabled := True;
+  UpdateUpdateMenu;
+end;
+
+function TForm1.UpdateCheckDue: Boolean;
+const
+  OneDay = 24 * 60 * 60;
+begin
+  Result := False;
+  if MdCliOpts.NoUpdateCheck or (not FUpdateAutoCheck) or FShuttingDown then
+    Exit;
+  if FUpdateLastCheck <= 0 then
+    Exit(True);
+  Result := (DateTimeToUnix(Now, False) - FUpdateLastCheck) >= OneDay;
+end;
+
+procedure TForm1.tmrUpdateCheckTimer(Sender: TObject);
+var
+  Report: TMdUpdateResult;
+begin
+  if FUpdateThread <> nil then
   begin
-    if MessageDlg(ABOUTMDPAD+#13#13'Want to read more about?',mtInformation, mbYesNo, 0) = mrYes then
-      OpenMDFile(ExtractFilePath(ParamStr(0))+'Readme.md');
+    if not FUpdateThread.Finished then
+      Exit;
+    Report := FUpdateThread.UpdateResult;
+    FreeAndNil(FUpdateThread);
+    ApplyUpdateResult(Report);
+  end;
+
+  if FUpdateAutoPending then
+  begin
+    FUpdateAutoPending := False;
+    if UpdateCheckDue then
+    begin
+      StartUpdateCheck(False);
+      Exit;
+    end;
+  end;
+
+  if FUpdateThread = nil then
+    tmrUpdateCheck.Enabled := False;
+end;
+
+procedure TForm1.ApplyUpdateResult(const AResult: TMdUpdateResult);
+var
+  Manual: Boolean;
+begin
+  Manual := FUpdateManual;
+  FUpdateManual := False;
+
+  // The attempt itself is what backs off, not its success: with no network the
+  // next automatic check would otherwise happen at every start.
+  FUpdateLastCheck := DateTimeToUnix(Now, False);
+  if AResult.Checked and (AResult.Version <> '') then
+  begin
+    FUpdateLatest := AResult.Version;
+    FUpdateLatestUrl := AResult.URL;
+  end;
+  // Saved right away (not only in FormDestroy): a crash or a kill must not
+  // turn the daily check into a check at every start.
+  SaveINI;
+  UpdateUpdateMenu;
+
+  if not Manual then
+    Exit;
+  if not AResult.Checked then
+  begin
+    // A failed request is not a dead end when an earlier one already found a
+    // newer release: offer that page (stored in the settings) instead of only
+    // the error.
+    if MdVersionIsNewer(FUpdateLatest, MdVersion) and (FUpdateLatestUrl <> '') then
+    begin
+      if MessageDlg('MDPad could not check for updates.'#13#13 + AResult.Error
+        + #13#13'The last known release is ' + FUpdateLatest
+        + '. Open its release page?', mtWarning, [mbYes, mbNo], 0) = mrYes then
+        OpenURL(FUpdateLatestUrl);
+    end
+    else
+      MessageDlg('MDPad could not check for updates.'#13#13 + AResult.Error,
+        mtWarning, [mbOK], 0);
+  end
+  else if AResult.Available then
+  begin
+    if MessageDlg('MDPad ' + AResult.Version + ' is available.'#13#13
+      + 'Open the release page?', mtInformation, [mbYes, mbNo], 0) = mrYes then
+      OpenURL(AResult.URL);
   end
   else
-    MessageDlg(ABOUTMDPAD,mtInformation, [mbOK], 0);
+    MessageDlg('MDPad is up to date (' + MdVersion + ').',
+      mtInformation, [mbOK], 0);
+end;
+
+procedure TForm1.UpdateUpdateMenu;
+begin
+  if mnuCheckUpdates = nil then
+    Exit;
+  if FUpdateThread <> nil then
+  begin
+    mnuCheckUpdates.Caption := 'Checking for &updates...';
+    mnuCheckUpdates.Enabled := False;
+    Exit;
+  end;
+  mnuCheckUpdates.Enabled := True;
+  if (FUpdateLatest <> '') and MdVersionIsNewer(FUpdateLatest, MdVersion) then
+    mnuCheckUpdates.Caption := '&Update available: ' + FUpdateLatest + '...'
+  else
+    mnuCheckUpdates.Caption := 'Check for &updates...';
+end;
+
+procedure TForm1.mnuCheckUpdatesClick(Sender: TObject);
+begin
+  StartUpdateCheck(True);
+end;
+
+procedure TForm1.mnuAutoUpdateClick(Sender: TObject);
+begin
+  FUpdateAutoCheck := not FUpdateAutoCheck;
+  mnuAutoUpdate.Checked := FUpdateAutoCheck;
+  SaveINI;
+  if FUpdateAutoCheck and (FUpdateThread = nil) then
+    // Turning it back on is an explicit request: do not wait for tomorrow.
+    StartUpdateCheck(False);
 end;
 
 procedure TForm1.Copy1Click(Sender: TObject);
@@ -2227,6 +2419,17 @@ begin
       AddToMRU(MdCliOpts.FileName);
     end;
   end;
+
+  // The update check is a one-shot timer, created here rather than in the .lfm
+  // so a run with --no-update-check (or with the setting off) starts nothing.
+  // The first tick decides whether a check is due; after that the same timer
+  // reaps the finished thread (see tmrUpdateCheckTimer).
+  FUpdateAutoPending := True;
+  tmrUpdateCheck := TTimer.Create(Self);
+  tmrUpdateCheck.Interval := 5000;
+  tmrUpdateCheck.OnTimer := tmrUpdateCheckTimer;
+  tmrUpdateCheck.Enabled := True;
+  UpdateUpdateMenu;
 end;
 
 procedure TForm1.FormDestroy(Sender: TObject);
@@ -2238,6 +2441,16 @@ begin
   // bombee la cola, y SyncUpdateUI sale temprano gracias a FShuttingDown.
   // Sin esto, un worker vivo tocaría PreviewHtml/Form1 ya liberados -> GPF.
   FShuttingDown := True;
+  // The update thread never synchronizes (the timer reads its result), so it
+  // only has to be waited for, not pumped. Terminate helps between the HTTP
+  // client's own operations; the socket timeouts bound the wait.
+  if FUpdateThread <> nil then
+  begin
+    FUpdateThread.Terminate;
+    while not FUpdateThread.Finished do
+      Sleep(10);
+    FreeAndNil(FUpdateThread);
+  end;
   while FActiveTaskCount > 0 do
   begin
     CheckSynchronize(0);
@@ -2631,6 +2844,13 @@ begin
         for i := FMRU.Count to 29 do
           ini.DeleteKey('Files', 'mru' + IntToStr(i));
       end;
+
+      // [Updates] is written here as well as right after a check, so a toggle
+      // of the Preferences item and a window close both keep the state current.
+      ini.WriteBool('Updates', 'autocheck', FUpdateAutoCheck);
+      ini.WriteInt64('Updates', 'lastcheck', FUpdateLastCheck);
+      ini.WriteString('Updates', 'latest', FUpdateLatest);
+      ini.WriteString('Updates', 'latesturl', FUpdateLatestUrl);
 
       SaveEditorOptions(ini);
     finally
@@ -3141,6 +3361,15 @@ begin
       Loadremoteimages1.Checked := ini.ReadBool('MDPad', 'remoteimages', true);
       ApplyRemoteImagesSetting(False);
 
+      // Update check: on by default and at most once a day. The last answer is
+      // kept so the Help menu and the About box can show it without waiting for
+      // the next request; a settings.ini from an older build has no keys at all.
+      FUpdateAutoCheck := ini.ReadBool('Updates', 'autocheck', true);
+      FUpdateLastCheck := ini.ReadInt64('Updates', 'lastcheck', 0);
+      FUpdateLatest := ini.ReadString('Updates', 'latest', '');
+      FUpdateLatestUrl := ini.ReadString('Updates', 'latesturl', '');
+      mnuAutoUpdate.Checked := FUpdateAutoCheck;
+
       // Recent files: full paths, most recent first. The list's own length is
       // the limit (the Options dialog picks it, 10 by default).
       FMRULimit := ini.ReadInteger('Files', 'mrucount', 10);
@@ -3164,6 +3393,7 @@ begin
       UpdateEngineInMenu;
       UpdatePreviewInMenu;
       UpdateThemeInMenu;
+      UpdateUpdateMenu;
 
     finally
       ini.Free;

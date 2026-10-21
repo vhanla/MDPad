@@ -15,7 +15,7 @@ unit mdcli;
 interface
 
 uses
-  SysUtils;
+  SysUtils, mdversioninfo;
 
 type
   TMdCliView = (cvKeep, cvBoth, cvEditor, cvResult);
@@ -39,13 +39,14 @@ type
     Sync: TMdCliSwitch;
     RemoteImages: TMdCliSwitch;
     Zoom: Integer;          // 0 = keep, otherwise 50..200 (percent)
+    // Session-only, with no settings key: --no-update-check keeps this run from
+    // checking GitHub automatically (useful for scripts and tests too). An
+    // explicit Help > Check for updates still works.
+    NoUpdateCheck: Boolean;
   end;
 
-const
-  // The one version number: the About box builds itself from this (see
-  // ABOUTMDPAD in pagedown.inc) and --version prints it. Keep it equal to the
-  // VERSION file -- tools/build-release.sh checks that it is.
-  MdVersion = '1.3.7';
+// MdVersion lives in mdversioninfo.pas, which is also what the About dialog and
+// tools/build-release.sh read; --version prints it below.
 
 var
   // Filled by MdCliParse; the form reads it at startup.
@@ -94,6 +95,7 @@ begin
     '  --syntax=on|off         Editor syntax highlighting.' + LineEnding +
     '  --sync=on|off           Two-way scroll sync between editor and preview.' + LineEnding +
     '  --remote-images=on|off  Fetch remote images in the canvas preview.' + LineEnding +
+    '  --no-update-check       Do not check for updates automatically this run.' + LineEnding +
     '  -h, --help              This help.' + LineEnding +
     '  --version               Print the version and exit.' + LineEnding +
     '' + LineEnding +
@@ -181,6 +183,7 @@ begin
   MdCliOpts.Sync := csKeep;
   MdCliOpts.RemoteImages := csKeep;
   MdCliOpts.Zoom := 0;
+  MdCliOpts.NoUpdateCheck := False;
 
   NoMoreOptions := False;
   I := 1;
@@ -319,6 +322,9 @@ begin
         else
           MdCliOpts.RemoteImages := Switch;
       end
+
+      else if Name = 'no-update-check' then
+        MdCliOpts.NoUpdateCheck := True
 
       else if Name = 'zoom' then
       begin

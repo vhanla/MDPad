@@ -1950,6 +1950,13 @@ object Form1: TForm1
           Caption = 'Enable Custom &Style (style.css)'
           OnClick = mnuCSSClick
         end
+        object mnuPrefSep2: TMenuItem
+          Caption = '-'
+        end
+        object mnuAutoUpdate: TMenuItem
+          Caption = 'Check for &updates automatically'
+          OnClick = mnuAutoUpdateClick
+        end
       end
       object N2: TMenuItem
         Caption = '-'
@@ -2181,6 +2188,13 @@ object Form1: TForm1
         OnClick = Helponline1Click
       end
       object N8: TMenuItem
+        Caption = '-'
+      end
+      object mnuCheckUpdates: TMenuItem
+        Caption = 'Check for &updates...'
+        OnClick = mnuCheckUpdatesClick
+      end
+      object N14: TMenuItem
         Caption = '-'
       end
       object About1: TMenuItem

@@ -16,6 +16,14 @@ Originally it was written in Delphi, but now it has been ported to Lazarus Objec
 + Lightweight, binary files less than 5MB.
 + Exports to HTML.
 + Sync text editor with preview in real time.
++ Canvas preview (Markdown4D), table of contents, light/dark themes.
++ Formatting bar, link/image/table dialogs and Smart Enter for lists.
++ Command line options (`--help`); a markdown file argument opens as a reader.
++ Optional update check against the GitHub releases (at most once a day and
+  silent; *Help > Check for updates* asks, *Preferences > Check for updates
+  automatically* turns it off).
++ About window with the credits and the licenses of the bundled libraries
+  (the full notices are in `THIRDPARTY.md`).
 
 ## TODO
 

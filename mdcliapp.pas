@@ -15,7 +15,7 @@ interface
 implementation
 
 uses
-  SysUtils, mdcli;
+  SysUtils, mdcli, mdversioninfo;
 
 var
   CliError: string;

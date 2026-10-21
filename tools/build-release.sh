@@ -25,8 +25,8 @@
 # libQt6Pas, and the deb gains Qt6 dependencies; Flatpak is skipped).
 #
 # Version: --version, then $VERSION, then the VERSION file. It must match
-# MdVersion in mdcli.pas, which is what the About box and --version print (the
-# script refuses to build when they disagree).
+# MdVersion in mdversioninfo.pas, which is what the About box and --version print
+# (the script refuses to build when they disagree).
 #
 # Environment overrides:
 #   LAZBUILD, PCP       Lazarus lazbuild and its --pcp directory
@@ -94,12 +94,12 @@ if [ -z "$VERSION" ]; then
 fi
 [[ $VERSION =~ ^[0-9]+(\.[0-9]+)+([._-][0-9A-Za-z]+)*$ ]] \
   || die "version '$VERSION' does not look like a release version"
-# The About box builds itself from MdVersion (mdcli.pas) and --version prints
-# it, so a release whose VERSION disagrees would ship a lying binary.
-SRC_VERSION=$(sed -n "s/^[[:space:]]*MdVersion[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" mdcli.pas | head -1)
-[ -n "$SRC_VERSION" ] || die "MdVersion not found in mdcli.pas"
+# The About box builds itself from MdVersion (mdversioninfo.pas) and --version
+# prints it, so a release whose VERSION disagrees would ship a lying binary.
+SRC_VERSION=$(sed -n "s/^[[:space:]]*MdVersion[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" mdversioninfo.pas | head -1)
+[ -n "$SRC_VERSION" ] || die "MdVersion not found in mdversioninfo.pas"
 [ "$SRC_VERSION" = "$VERSION" ] \
-  || die "VERSION is $VERSION but MdVersion in mdcli.pas is $SRC_VERSION"
+  || die "VERSION is $VERSION but MdVersion in mdversioninfo.pas is $SRC_VERSION"
 DATE=${RELEASE_DATE:-$(date +%F)}
 # Reproducible artifacts: the tarball is referenced by the PKGBUILD and the
 # Flatpak manifest, so its hash must not change between two builds of the same
@@ -204,6 +204,9 @@ stage_payload() { # $1 = directory that gets the files the app reads next to its
   # The About box and the first start look for this exact spelling.
   install -m 644 "$PROJDIR/README.md" "$1/Readme.md"
   install -m 644 "$PROJDIR/LICENSE" "$1/LICENSE"
+  # Copyright notices and license texts of the bundled libraries. The About
+  # dialog opens this file when it is next to the binary.
+  install -m 644 "$PROJDIR/THIRDPARTY.md" "$1/THIRDPARTY.md"
   install -m 644 "$METAOUT" "$1/$META"
   install -m 644 "$PROJDIR/packaging/$DESKTOP" "$1/$DESKTOP"
   cp -a "$PROJDIR/packaging/icons" "$1/icons"
@@ -275,6 +278,7 @@ EOF
   cp -a "$PROJDIR/packaging/icons/hicolor/." "$root/usr/share/icons/hicolor/"
 
   install -m 644 "$PROJDIR/LICENSE" "$doc/copyright"
+  install -m 644 "$PROJDIR/THIRDPARTY.md" "$doc/THIRDPARTY.md"
   install -m 644 "$PROJDIR/README.md" "$doc/README.md"
 
   local size
@@ -292,6 +296,7 @@ Architecture: amd64
 Maintainer: ${MAINTAINER:-vhanla <vhanla@users.noreply.github.com>}
 Installed-Size: $size
 Depends: $deps
+Recommends: libssl3 | libssl1.1, ca-certificates
 Homepage: https://github.com/vhanla/MDPad
 Description: simple, fast Markdown editor and viewer
  MDPad is a native Markdown editor and viewer. It opens files instantly,
@@ -367,6 +372,7 @@ arch=('x86_64')
 url="https://github.com/vhanla/MDPad"
 license=('MIT')
 depends=('gtk3')
+optdepends=('openssl: HTTPS update check' 'ca-certificates: HTTPS update check')
 provides=('mdpad')
 conflicts=('mdpad')
 options=('!strip' '!debug')
@@ -393,6 +399,8 @@ package() {
   cp -a "\$srcdir/$TARNAME/icons/hicolor" "\$pkgdir/usr/share/icons/"
   install -m644 "\$srcdir/$TARNAME/LICENSE" \\
     "\$pkgdir/usr/share/licenses/\$pkgname/LICENSE"
+  install -m644 "\$srcdir/$TARNAME/THIRDPARTY.md" \\
+    "\$pkgdir/usr/share/licenses/\$pkgname/THIRDPARTY.md"
 }
 EOF
 }

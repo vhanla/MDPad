@@ -2748,22 +2748,3 @@ MARKDOWNIT = '<script type="text/javascript">'
 +#13'		}'
 +#13'            update();'
 +#13'        </script>';
-
-
-// The one version number lives in mdcli.pas (MdVersion), so the About box and
-// --version cannot drift apart; tools/build-release.sh checks it against VERSION.
-ABOUTMDPAD = 'MDPad v ' + MdVersion + ' beta'
-+#13' Author: Victor Alberto Gil <vhanla>'
-+#13' http://apps.codigobit.info'
-+#13
-+#13' Third party Markdown Engines:'
-+#13' - PageDown'
-+#13' - MarkdownJS v0.6.0beta1'
-+#13' - Marked v0.3.5'
-+#13' - MarkdownIt 7.0.0'
-+#13' Source Code on their github repo, no modified';
-
-
-
-
-
